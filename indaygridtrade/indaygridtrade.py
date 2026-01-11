@@ -13,7 +13,7 @@ from xtquant import xtdata
 
 # ==================== 用户配置区域 ====================
 MINI_QMT_PATH = r'D:\光大证券金阳光QMT实盘\userdata_mini'
-ACCOUNT_ID = '88888888'
+ACCOUNT_ID = '47601131'
 
 # 1. 资金风控
 MAX_DAILY_BUY_AMOUNT = 100000.0   
@@ -159,22 +159,45 @@ class RobustStrategy:
         return (pct < BENCHMARK_RISK_THRESH), pct
 
     def place_order(self, stock, action_type, volume, price, remark=""):
+        # 1. 基础信息准备
         action_str = "买入" if action_type == xtconstant.STOCK_BUY else "卖出"
+        # 委托价格（带 0.5% 滑点，保证成交）
         trade_price = price * 1.005 if action_type == xtconstant.STOCK_BUY else price * 0.995
+        
+        # 2. 费用计算核心逻辑 (精细化版)
+        amount = trade_price * volume  # 预估成交金额
+        
+        # A. 佣金 (Commission): 万分之一，最低 5 元
+        commission_rate = 0.0001
+        commission = max(5.0, amount * commission_rate)
+        
+        # B. 印花税 (Stamp Duty): 仅卖出收取，万分之五
+        stamp_duty = 0.0
+        if action_type == xtconstant.STOCK_SELL:
+            stamp_duty = amount * 0.0005
+            
+        # C. 总费用
+        total_fee = commission + stamp_duty
+        
+        # 3. 构造日志信息
         bj_time_str = datetime.datetime.now(BJ_TZ).strftime("%Y-%m-%d %H:%M:%S")
         
-        log_line = f"[{bj_time_str}] [BJ] {action_str} | 代码:{stock} | 数量:{volume} | 价格:{trade_price:.2f} | 说明:{remark}\n"
-        print("\n" + "*"*50)
-        print(log_line.strip())
-        print("*"*50 + "\n")
-        try:
-            with open(self.log_file, 'a', encoding='utf-8') as f: f.write(log_line)
-        except: pass
+        # 日志格式优化：显示明细 (佣金+印花税) 让账目更清晰
+        log_line = (f"[{bj_time_str}] [BJ] {action_str} | 代码:{stock} | 数量:{volume} | "
+                    f"价格:{trade_price:.2f} | 费用:{total_fee:.2f} (佣:{commission:.1f}+税:{stamp_duty:.1f}) | "
+                    f"说明:{remark}\n")
         
-        # 2. 真实交易代码 (默认注释状态)
-        # -----------------------------------------------------------
-        # 【重要】实盘时，请删除下面三引号（'''）来取消注释
-        # -----------------------------------------------------------
+        print("\n" + "*"*60)
+        print(log_line.strip())
+        print("*"*60 + "\n")
+        
+        try:
+            with open(self.log_file, 'a', encoding='utf-8') as f: 
+                f.write(log_line)
+        except: 
+            pass
+            
+        # 4. 真实交易代码 (默认注释状态)
         '''
         print(f">>> 正在发送真实交易指令: {stock} {action_str} ...")
         self.trader.order_stock(
@@ -188,7 +211,7 @@ class RobustStrategy:
             "0"                        # 订单ID(0为自动)
         )
         '''
-        # -----------------------------------------------------------
+
     def run_logic(self):
         now_dt = datetime.datetime.now(BJ_TZ)
         now_str = now_dt.strftime('%H:%M:%S')
