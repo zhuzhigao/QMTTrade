@@ -11,7 +11,7 @@ from xtquant.xttype import StockAccount
 
 # ==================== 用户配置区域 ====================
 # [核心开关] True=模拟模式(读CSV), False=实盘模式(读账户)
-SIMULATION = False  
+SIMULATION = True  
 
 MINI_QMT_PATH = r'D:\光大证券金阳光QMT实盘\userdata_mini'
 ACCOUNT_ID = '47601131'
@@ -90,13 +90,12 @@ class PositionManager:
                             'cost': float(row['cost'])
                         }
                 print(f">>> [模拟] 已加载持仓文件: {load_file}, 共 {len(self.sim_positions)} 只股票")
-                self.download_historical_data()
             except Exception as e:
                 print(f"!!! [模拟] 读取持仓文件失败: {e}")
         else:
              print(f"!!! [模拟]没有找到持仓文件")
 
-    def download_historical_data(self):
+    def download_historical_data(self, monitor_stocks):
         # 获取当前的北京时间
         # 无论服务器在伦敦还是纽约，这个 time_now 永远是北京时间
         now_bj = datetime.datetime.now(BJ_TZ)
@@ -111,10 +110,9 @@ class PositionManager:
 
         print(f"准备下载数据范围: {start_date} ~ {end_date}")
         
-        codes = set(self.get_all_positions_codes())
-        for stock_code in list(codes):
+        for stock_code in list(monitor_stocks):
             xtdata.download_history_data(stock_code, period='1d', start_time=start_date, end_time=end_date)
-        print(f"!!! 数据下载完成，共 {len(codes)} 只股票")
+        print(f"!!! 数据下载完成，共 {len(monitor_stocks)} 只股票")
 
     def get_position(self, stock_code):
         """
@@ -395,7 +393,10 @@ class RobustStrategy:
         
         # 初始化持仓管理器
         self.pos_mgr = PositionManager(self.trader, self.acc)
-        
+        monitor_stocks = self.pos_mgr.get_all_positions_codes()
+        self.lastest_init_stocks = set(monitor_stocks)
+        self.pos_mgr.download_historical_data(monitor_stocks)
+
         xtdata.subscribe_quote(BENCHMARK_INDEX, period='tick', count=1)
 
         while True:
@@ -422,9 +423,14 @@ class RobustStrategy:
         # --- 数据源切换 ---
         cash, total_asset = self.pos_mgr.get_cash_and_asset()
         monitor_stocks = self.pos_mgr.get_all_positions_codes()
-
         monitor_set = set(monitor_stocks) | set(self.data['stocks'].keys()) 
         stock_list = list(monitor_set)
+        new_stocks = monitor_set - self.lastest_init_stocks
+        if new_stocks:  
+            print(f"\n>>> 发现新监控股票，更新历史数据: {new_stocks}")
+            self.pos_mgr.download_historical_data(new_stocks)
+           
+        self.lastest_init_stocks = set(monitor_stocks)
         
         if not stock_list: 
             print(f"\r[{now_time}] 空仓且无关注股票...", end="")
