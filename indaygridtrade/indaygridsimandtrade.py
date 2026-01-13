@@ -59,7 +59,8 @@ class PositionManager:
         self.sim_positions = {} # 格式: {stock: {'volume': 100, 'cost': 10.5}}
         
         if SIMULATION:
-            self._init_sim_data()
+            self.init_sim_data()
+            print(f">>> [模拟] 已加载最新持仓文件， 共 {len(self.sim_positions)} 只股票")
             
     def load_input_csv_stocks(self):
         """仅读取 siminput.csv 中的股票代码，用于实盘监控"""
@@ -74,7 +75,7 @@ class PositionManager:
                 print(f"!!! 读取 {CSV_INPUT_POS} 失败: {e}")
         return list(stocks)
         
-    def _init_sim_data(self):
+    def init_sim_data(self):
         """模拟模式：从 input.csv 或 current.csv 加载持仓"""
         # 优先读取 current.csv (上次运行状态)，如果没有则读取 input.csv (初始状态)
         load_file = CSV_CURRENT_POS if os.path.exists(CSV_CURRENT_POS) else CSV_INPUT_POS
@@ -84,12 +85,12 @@ class PositionManager:
                 df = pd.read_csv(load_file, encoding='utf-8-sig')
                 # 确保列名存在
                 if not df.empty and all(col in df.columns for col in ['stock_code', 'cost', 'volume']):
+                    self.sim_positions.clear()
                     for _, row in df.iterrows():
                         self.sim_positions[row['stock_code']] = {
                             'volume': int(row['volume']),
                             'cost': float(row['cost'])
                         }
-                print(f">>> [模拟] 已加载持仓文件: {load_file}, 共 {len(self.sim_positions)} 只股票")
             except Exception as e:
                 print(f"!!! [模拟] 读取持仓文件失败: {e}")
         else:
@@ -140,6 +141,7 @@ class PositionManager:
     def get_all_positions_codes(self):
         """获取所有持仓股票代码列表"""
         if SIMULATION:
+            self.init_sim_data()  # 确保数据最新
             return [k for k, v in self.sim_positions.items() if v['volume'] > 0]
         else:
             positions = self.trader.query_stock_positions(self.account)
