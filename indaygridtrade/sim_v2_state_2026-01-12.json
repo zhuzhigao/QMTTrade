@@ -1,0 +1,101 @@
+{
+    "daily_buy_total": 0.0,
+    "stocks": {
+        "601988.SH": {
+            "bought": 0,
+            "sold": 0
+        },
+        "601919.SH": {
+            "bought": 0,
+            "sold": 0
+        },
+        "600900.SH": {
+            "bought": 0,
+            "sold": 0
+        },
+        "688981.SH": {
+            "bought": 0,
+            "sold": 0
+        },
+        "601898.SH": {
+            "bought": 0,
+            "sold": 0
+        },
+        "002920.SZ": {
+            "bought": 0,
+            "sold": 0
+        },
+        "600050.SH": {
+            "bought": 0,
+            "sold": 0
+        },
+        "601601.SH": {
+            "bought": 0,
+            "sold": 0
+        },
+        "002594.SZ": {
+            "bought": 0,
+            "sold": 0
+        },
+        "600887.SH": {
+            "bought": 0,
+            "sold": 0
+        },
+        "002202.SZ": {
+            "bought": 0,
+            "sold": 0
+        },
+        "300750.SZ": {
+            "bought": 0,
+            "sold": 0
+        },
+        "601633.SH": {
+            "bought": 0,
+            "sold": 0
+        },
+        "002555.SZ": {
+            "bought": 0,
+            "sold": 1
+        },
+        "688126.SH": {
+            "bought": 0,
+            "sold": 0
+        },
+        "603986.SH": {
+            "bought": 0,
+            "sold": 0
+        },
+        "600886.SH": {
+            "bought": 0,
+            "sold": 0
+        },
+        "002371.SZ": {
+            "bought": 0,
+            "sold": 0
+        },
+        "601360.SH": {
+            "bought": 0,
+            "sold": 1
+        },
+        "601857.SH": {
+            "bought": 0,
+            "sold": 0
+        },
+        "601600.SH": {
+            "bought": 0,
+            "sold": 0
+        },
+        "600941.SH": {
+            "bought": 0,
+            "sold": 0
+        },
+        "601788.SH": {
+            "bought": 0,
+            "sold": 0
+        },
+        "301308.SZ": {
+            "bought": 0,
+            "sold": 0
+        }
+    }
+}

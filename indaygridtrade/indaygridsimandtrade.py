@@ -77,8 +77,30 @@ class PositionManager:
                             'cost': float(row['cost'])
                         }
                 print(f">>> [模拟] 已加载持仓文件: {load_file}, 共 {len(self.sim_positions)} 只股票")
+                self.download_historical_data()
             except Exception as e:
                 print(f"!!! [模拟] 读取持仓文件失败: {e}")
+        else:
+             print(f"!!! [模拟]没有找到持仓文件")
+
+    def download_historical_data(self):
+        # 获取当前的北京时间
+        # 无论服务器在伦敦还是纽约，这个 time_now 永远是北京时间
+        now_bj = datetime.datetime.now(BJ_TZ)
+
+        # --- 计算日期 ---
+        # 假设下载最近 100 天
+        days_to_look_back = ATR_PERIOD * 2 
+
+        # 使用北京时间计算 start 和 end
+        start_date = (now_bj - datetime.timedelta(days=days_to_look_back)).strftime('%Y%m%d')
+        end_date = now_bj.strftime('%Y%m%d')
+
+        print(f"准备下载数据范围: {start_date} ~ {end_date}")
+        codes = self.get_all_positions_codes()
+        for stock_code in codes:
+            xtdata.download_history_data(stock_code, period='1d', start_time=start_date, end_time=end_date)
+        print(f"!!! [模拟] 下载历史数据完成")
 
     def get_position(self, stock_code):
         """
@@ -220,6 +242,7 @@ class RobustStrategy:
                 self.data = self.load_state()
             else:
                 self.save_state()
+            self.pos_mgr.download_historical_data()
 
     def log_trade_csv(self, stock, action_str, volume, price, cost, pnl):
         """统一记录交易日志到 CSV"""
@@ -258,11 +281,11 @@ class RobustStrategy:
         if SIMULATION:
             # 模拟：更新内存和 current.csv
             self.pos_mgr.update_sim_position(stock, action_type, volume, trade_price)
-        else:
+        #else:
             # 实盘：发送订单
-            self.trader.order_stock(
-                self.acc, stock, action_type, int(volume), xtconstant.FIX_PRICE, trade_price, f"策略:{remark}", "0"
-            )
+            #self.trader.order_stock(
+            #    self.acc, stock, action_type, int(volume), xtconstant.FIX_PRICE, trade_price, f"策略:{remark}", "0"
+            #)
 
         # 5. 统一写日志
         self.log_trade_csv(stock, action_str, volume, trade_price, curr_cost, pnl)
@@ -272,15 +295,64 @@ class RobustStrategy:
         self.update_stock_state(stock, st_action, money_amount=(amount if st_action=='buy' else 0))
 
     def calculate_atr_data(self, stock_list):
+        # 1. 筛选需要计算的股票
         need_calc = [s for s in stock_list if s not in self.atr_map]
         if not need_calc: return
-        data_map = xtdata.get_market_data(field_list=['high', 'low', 'close'], stock_list=need_calc, period='1d', count=ATR_PERIOD+10, dividend_type='front')
+
+        # 2. 获取数据
+        data_map = xtdata.get_market_data(
+            field_list=['high', 'low', 'close'], 
+            stock_list=need_calc, 
+            period='1d', 
+            count=ATR_PERIOD+10, 
+            dividend_type='front'
+        )
+
+        # --- 【核心修复】检查并转置数据 ---
+        # 如果列名是日期（长度为8，如'20251207'），说明数据是横着的，需要转置
+        sample_col = data_map['close'].columns[0] if len(data_map['close'].columns) > 0 else ''
+        if len(str(sample_col)) == 8 and str(sample_col).isdigit():
+            print("检测到数据格式为 [行=股票, 列=时间]，正在执行转置(.T)...")
+            for field in ['high', 'low', 'close']:
+                data_map[field] = data_map[field].T
+        # --------------------------------
+
+        # 3. 开始计算 ATR
         for stock in need_calc:
-            if stock not in data_map: self.atr_map[stock] = None; continue
-            df = data_map[stock]
-            if len(df) < ATR_PERIOD: self.atr_map[stock] = None; continue
-            tr = pd.concat([df['high']-df['low'], (df['high']-df['close'].shift(1)).abs(), (df['low']-df['close'].shift(1)).abs()], axis=1).max(axis=1)
+            # 现在数据已经转置，列名就是股票代码了，这个判断可以正常工作了
+            if stock not in data_map['close'].columns:
+                self.atr_map[stock] = None
+                continue
+                
+            # 提取该股票的数据列
+            try:
+                df = pd.DataFrame({
+                    'high':  data_map['high'][stock],
+                    'low':   data_map['low'][stock],
+                    'close': data_map['close'][stock]
+                })
+            except KeyError:
+                self.atr_map[stock] = None
+                continue
+            
+            # 去除空值（停牌日）
+            df.dropna(inplace=True)
+
+            if len(df) < ATR_PERIOD: 
+                self.atr_map[stock] = None
+                continue
+                
+            # 计算 TR 和 ATR
+            tr = pd.concat([
+                df['high'] - df['low'], 
+                (df['high'] - df['close'].shift(1)).abs(), 
+                (df['low'] - df['close'].shift(1)).abs()
+            ], axis=1).max(axis=1)
+            
             self.atr_map[stock] = tr.rolling(window=ATR_PERIOD).mean().iloc[-1]
+            
+        print(f"ATR计算完成，成功更新 {len(need_calc)} 只股票")
+       
 
     def is_limit_down(self, tick):
         pct = (tick['lastPrice'] - tick['lastClose']) / tick['lastClose']
@@ -370,6 +442,8 @@ class RobustStrategy:
                 total_return_pct = (price - avg_cost) / avg_cost
             
             atr = self.atr_map.get(stock, pre*0.03)
+            if atr == None:
+                atr = pre*0.03
             # 动态网格阈值
             dyn_prof_line = (2 * atr) / pre  
             dyn_loss_line = -(2 * atr) / pre 
