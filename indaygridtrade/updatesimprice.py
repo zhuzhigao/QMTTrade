@@ -69,5 +69,24 @@ def update_csv_prices():
     else:
         print("\n⚠️ 没有数据被更新。")
 
+def start():
+        print(f">>> [启动检查] 正在连接行情服务...")
+        
+        # 1. 显式连接行情服务
+        try:
+            xtdata.connect(port=58609)
+            # 测试一下是否连通
+            xtdata.get_market_data(field_list=['close'], stock_list=['000001.SH'], period='1d', count=1)
+            print(">>> [行情服务] 连接成功！")
+        except Exception as e:
+            print(f"\n!!! [严重错误] 无法连接 QMT 行情服务。")
+            print("请确认：\n1. 金阳光 QMT 极简模式已登录\n2. 端口号是否为 58609\n")
+            return # 连接失败直接退出，不要往下跑了
+
+        mode_str = "模拟盘(Input/Current CSV)" if SIMULATION else "实盘(QMT账户 + Input CSV)"
+        print(f">>> [启动策略] 模式: {mode_str}")
+        
+ 
 if __name__ == '__main__':
-    update_csv_prices()
+    #update_csv_prices()
+    start()

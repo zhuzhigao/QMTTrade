@@ -11,13 +11,13 @@ from xtquant.xttype import StockAccount
 
 # ==================== 用户配置区域 ====================
 # [核心开关] True=模拟模式(读CSV), False=实盘模式(读账户)
-SIMULATION = True  
+SIMULATION = False  
 
 MINI_QMT_PATH = r'D:\光大证券金阳光QMT实盘\userdata_mini'
 ACCOUNT_ID = '47601131'
 
 # 文件路径配置
-CSV_INPUT_POS = 'siminput.csv'       # 模拟：初始持仓
+CSV_INPUT_POS = 'siminput.csv'       # 模拟：初始持仓 / 实盘：重点关注池
 CSV_CURRENT_POS = 'simcurrent.csv'   # 模拟：当前持仓（动态更新）
 LOG_FILE_REAL = 'tradelog.csv'       # 实盘：交易日志
 LOG_FILE_SIM = 'simlog.csv'       # 模拟：交易日志
@@ -33,7 +33,7 @@ TRAILING_DRAWDOWN = 0.005
 
 # 3. 抄底参数
 BUY_DIP_PCT = -0.06        
-REBOUND_PCT = 0.005  # [新增] 右侧交易确认：从最低点反弹幅度 (0.5%)
+REBOUND_PCT = 0.005  # 右侧交易确认：从最低点反弹幅度 (0.5%)
 
 # 4. ATR 动态参数
 ATR_MULTIPLIER = 2.0       
@@ -60,6 +60,19 @@ class PositionManager:
         
         if SIMULATION:
             self._init_sim_data()
+            
+    def load_input_csv_stocks(self):
+        """仅读取 siminput.csv 中的股票代码，用于实盘监控"""
+        stocks = set()
+        if os.path.exists(CSV_INPUT_POS):
+            try:
+                df = pd.read_csv(CSV_INPUT_POS, encoding='utf-8-sig')
+                if 'stock_code' in df.columns:
+                    # 确保是字符串并去重
+                    stocks = set(df['stock_code'].astype(str).dropna().tolist())
+            except Exception as e:
+                print(f"!!! 读取 {CSV_INPUT_POS} 失败: {e}")
+        return list(stocks)
         
     def _init_sim_data(self):
         """模拟模式：从 input.csv 或 current.csv 加载持仓"""
@@ -89,7 +102,7 @@ class PositionManager:
         now_bj = datetime.datetime.now(BJ_TZ)
 
         # --- 计算日期 ---
-        # 假设下载最近 100 天
+
         days_to_look_back = ATR_PERIOD * 2 
 
         # 使用北京时间计算 start 和 end
@@ -97,10 +110,11 @@ class PositionManager:
         end_date = now_bj.strftime('%Y%m%d')
 
         print(f"准备下载数据范围: {start_date} ~ {end_date}")
-        codes = self.get_all_positions_codes()
-        for stock_code in codes:
+        
+        codes = set(self.get_all_positions_codes())
+        for stock_code in list(codes):
             xtdata.download_history_data(stock_code, period='1d', start_time=start_date, end_time=end_date)
-        print(f"!!! [模拟] 下载历史数据完成")
+        print(f"!!! 数据下载完成，共 {len(codes)} 只股票")
 
     def get_position(self, stock_code):
         """
@@ -131,7 +145,9 @@ class PositionManager:
             return [k for k, v in self.sim_positions.items() if v['volume'] > 0]
         else:
             positions = self.trader.query_stock_positions(self.account)
-            return [p.stock_code for p in positions if p.volume > 0]
+            codes = [p.stock_code for p in positions if p.volume > 0]
+            # [修改] 实盘模式下，额外监控 siminput.csv 中的股票
+            return set(codes) | set(self.load_input_csv_stocks())
 
     def get_cash_and_asset(self):
         """获取可用资金和总资产"""
@@ -286,6 +302,7 @@ class RobustStrategy:
             #self.trader.order_stock(
             #    self.acc, stock, action_type, int(volume), xtconstant.FIX_PRICE, trade_price, f"策略:{remark}", "0"
             #)
+            print(f"[实盘]模拟执行完成: {stock} {action_str} {volume}股 @ {trade_price:.2f}")
 
         # 5. 统一写日志
         self.log_trade_csv(stock, action_str, volume, trade_price, curr_cost, pnl)
@@ -312,7 +329,7 @@ class RobustStrategy:
         # 如果列名是日期（长度为8，如'20251207'），说明数据是横着的，需要转置
         sample_col = data_map['close'].columns[0] if len(data_map['close'].columns) > 0 else ''
         if len(str(sample_col)) == 8 and str(sample_col).isdigit():
-            print("检测到数据格式为 [行=股票, 列=时间]，正在执行转置(.T)...")
+            # print("检测到数据格式为 [行=股票, 列=时间]，正在执行转置(.T)...")
             for field in ['high', 'low', 'close']:
                 data_map[field] = data_map[field].T
         # --------------------------------
@@ -337,7 +354,6 @@ class RobustStrategy:
             
             # 去除空值（停牌日）
             df.dropna(inplace=True)
-
             if len(df) < ATR_PERIOD: 
                 self.atr_map[stock] = None
                 continue
@@ -368,7 +384,7 @@ class RobustStrategy:
         return (pct < BENCHMARK_RISK_THRESH), pct
 
     def start(self):
-        mode_str = "模拟盘(Input/Current CSV)" if SIMULATION else "实盘(QMT账户)"
+        mode_str = "模拟盘(Input/Current CSV)" if SIMULATION else "实盘(QMT账户 + Input CSV)"
         print(f">>> [启动策略] 模式: {mode_str}")
         
         self.trader.start()
@@ -406,12 +422,12 @@ class RobustStrategy:
         # --- 数据源切换 ---
         cash, total_asset = self.pos_mgr.get_cash_and_asset()
         monitor_stocks = self.pos_mgr.get_all_positions_codes()
-        # 加入之前关注但可能已清仓或想买入的股票 (从 state 里的 keys 获取)
-        monitor_set = set(monitor_stocks) | set(self.data['stocks'].keys())
+
+        monitor_set = set(monitor_stocks) | set(self.data['stocks'].keys()) 
         stock_list = list(monitor_set)
         
         if not stock_list: 
-            print(f"\r[{now_time}] 空仓等待中...", end="")
+            print(f"\r[{now_time}] 空仓且无关注股票...", end="")
             return
 
         self.calculate_atr_data(stock_list)
@@ -419,7 +435,7 @@ class RobustStrategy:
         ticks = xtdata.get_full_tick(stock_list)
         
         quota_left = MAX_DAILY_BUY_AMOUNT - self.data['daily_buy_total']
-        print(f"\r[{now_time}] 模式:{'SIM' if SIMULATION else 'REAL'} | 大盘:{m_pct:.2%} | 额度:{quota_left:.0f}", end="")
+        print(f"\r[{now_time}] 模式:{'SIM' if SIMULATION else 'REAL'} | 大盘:{m_pct:.2%} | 额度:{quota_left:.0f} | 监控:{len(stock_list)}只", end="")
 
         for stock in stock_list:
             if stock not in ticks: continue
@@ -427,7 +443,7 @@ class RobustStrategy:
             price = tick['lastPrice']
             pre = tick['lastClose']
             high_price = tick['high']
-            low_price = tick['low'] # [新增] 获取日内最低价
+            low_price = tick['low'] 
             
             if price <= 0: continue
             
@@ -442,15 +458,15 @@ class RobustStrategy:
                 total_return_pct = (price - avg_cost) / avg_cost
             
             atr = self.atr_map.get(stock, pre*0.03)
-            if atr == None:
-                atr = pre*0.03
+            if atr == None: atr = pre*0.03
+
             # 动态网格阈值
             dyn_prof_line = (2 * atr) / pre  
             dyn_loss_line = -(2 * atr) / pre 
             
             state = self.get_stock_state(stock)
 
-            # --- 卖出逻辑 ---
+            # --- 卖出逻辑 (仅当持有仓位时触发) ---
             if state['sold'] == 0 and vol > 0:
                 reason = ""
                 # 1. 总仓止盈/止损
@@ -471,7 +487,7 @@ class RobustStrategy:
                     self.execute_trade(stock, xtconstant.STOCK_SELL, vol, price, reason)
                     continue
 
-            # --- 买入逻辑 ---
+            # --- 买入逻辑 (空仓且大盘正常时触发) ---
             if state['bought'] == 0 and not is_crash:
                 # [修改] 增加右侧反弹逻辑：
                 # 1. 跌幅足够深 (<-6%)

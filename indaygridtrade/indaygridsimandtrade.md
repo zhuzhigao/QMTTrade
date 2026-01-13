@@ -81,6 +81,7 @@ stock_code,cost,volume
 600519.SH,1700.50,100
 000001.SZ,10.20,2000
 
+在 **模拟模式 (SIMULATION = False)** 下，除了监控持仓外，同时监控`siminput.csv`里面的股票
 
 ## 4. 关键参数与风格推荐
 
