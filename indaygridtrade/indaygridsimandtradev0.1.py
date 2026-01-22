@@ -11,7 +11,7 @@ from xtquant.xttype import StockAccount
 
 # ==================== 用户配置区域 ====================
 # [核心开关] True=模拟模式(读CSV), False=实盘模式(读账户)
-SIMULATION = True  
+SIMULATION = False  
 
 MINI_QMT_PATH = r'D:\光大证券金阳光QMT实盘\userdata_mini'
 ACCOUNT_ID = '47601131'
@@ -23,7 +23,7 @@ LOG_FILE_REAL = 'tradelog.csv'       # 实盘：交易日志
 LOG_FILE_SIM = 'simlog.csv'       # 模拟：交易日志
 
 # 1. 资金风控
-MAX_DAILY_BUY_AMOUNT = 100000.0   
+MAX_DAILY_BUY_AMOUNT = 30000.0   
 SINGLE_STOCK_LIMIT_PCT = 0.30     
 
 # 2. 止盈止损参数
@@ -44,10 +44,14 @@ BENCHMARK_INDEX = '000001.SH'
 BENCHMARK_RISK_THRESH = -0.025  
 
 # 6. 系统参数
-BUY_QUOTA = 20000 
+BUY_QUOTA = 15000 
 LOOP_INTERVAL = 5
 BJ_TZ = datetime.timezone(datetime.timedelta(hours=8))
+
+# 7. 系统参数
+HUADIAN = 0.002
 # ====================================================
+
 
 class PositionManager:
     """
@@ -142,7 +146,7 @@ class PositionManager:
         """获取所有持仓股票代码列表"""
         if SIMULATION:
             self.init_sim_data()  # 确保数据最新
-            return [k for k, v in self.sim_positions.items() if v['volume'] > 0]
+            return [k for k, v in self.sim_positions.items()]
         else:
             positions = self.trader.query_stock_positions(self.account)
             codes = [p.stock_code for p in positions if p.volume > 0]
@@ -185,9 +189,9 @@ class PositionManager:
             if curr['volume'] == 0:
                 curr['cost'] = 0.0
 
-        # 清理持仓为0的
-        if curr['volume'] == 0:
-            del self.sim_positions[stock]
+        # 不清理持仓为0的，继续监控
+        #if curr['volume'] == 0:
+        #    del self.sim_positions[stock]
         
         # 保存到 current.csv
         data_list = []
@@ -282,8 +286,8 @@ class RobustStrategy:
         
         action_str = "买入" if action_type == xtconstant.STOCK_BUY else "卖出"
         
-        # 2. 计算费用与滑点 [修改] 优化滑点为 0.5%
-        trade_price = price * 1.005 if action_type == xtconstant.STOCK_BUY else price * 0.995
+        # 2. 计算费用与滑点 [修改] 优化滑点为 0.2%
+        trade_price = price * (1 + HUADIAN) if action_type == xtconstant.STOCK_BUY else price * (1 - HUADIAN)
         amount = trade_price * volume
         
         # 3. 盈亏计算 (仅卖出时有意义)
@@ -302,7 +306,7 @@ class RobustStrategy:
             #self.trader.order_stock(
             #    self.acc, stock, action_type, int(volume), xtconstant.FIX_PRICE, trade_price, f"策略:{remark}", "0"
             #)
-            print(f"[实盘]模拟执行完成: {stock} {action_str} {volume}股 @ {trade_price:.2f}")
+            print(f"[实盘]执行完成: {stock} {action_str} {volume}股 @ {trade_price:.2f}")
 
         # 5. 统一写日志
         self.log_trade_csv(stock, action_str, volume, trade_price, curr_cost, pnl)
@@ -382,6 +386,72 @@ class RobustStrategy:
         if d['lastClose'] == 0: return False, 0.0
         pct = (d['lastPrice'] - d['lastClose']) / d['lastClose']
         return (pct < BENCHMARK_RISK_THRESH), pct
+    
+    def print_dashboard(self, now_time, m_pct, quota_left, stock_list, ticks):
+        """
+        核心显示模块：负责渲染监控看板
+        """
+        # 1. 准备数据
+        lines = []
+        mode = 'SIM' if SIMULATION else 'REAL'
+        cash, total_asset = self.pos_mgr.get_cash_and_asset()
+        
+        # 2. 拼接头部信息 (状态栏)
+        lines.append(f"========== 量化监控看板 ({now_time}) ==========")
+        lines.append(f"模式: {mode} | 大盘: {m_pct:+.2%} | 资金: {cash:.0f} | 额度: {quota_left:.0f}")
+        lines.append("-" * 65)
+        # 表头：增加一些宽度控制
+        lines.append(f"{'代码':<10} | {'名称':<8} | {'现价':<8} | {'涨跌幅':<8} | {'ATR':<6} | {'持仓/信号'}")
+        lines.append("-" * 65)
+
+        # 3. 遍历股票拼接行数据
+        # 为了版面整洁，可以按涨跌幅排序显示
+        # sorted_stocks = sorted(stock_list, key=lambda s: ticks[s]['lastPrice'] if s in ticks else 0, reverse=True)
+        
+        for stock in stock_list:
+            if stock not in ticks: continue
+            tick = ticks[stock]
+            price = tick['lastPrice']
+            pre = tick['lastClose']
+            
+            # 计算涨跌
+            pct = (price - pre) / pre if pre > 0 else 0
+            
+            # 获取名称 (兼容写法)
+            detail = xtdata.get_instrument_detail(stock)
+            name = "--"
+            if detail:
+                name = detail.get('InstrumentName', '--') if isinstance(detail, dict) else getattr(detail, 'InstrumentName', '--')
+            
+            # 获取 ATR 值 (用于显示波动率)
+            atr_val = self.atr_map.get(stock, 0)
+            atr_str = f"{atr_val:.2f}" if atr_val else "-"
+
+            # 获取持仓信息
+            vol, cost, _ = self.pos_mgr.get_position(stock)
+            
+            # 构建信号提示
+            status_msg = ""
+            if vol > 0:
+                status_msg = f"持仓:{vol}"
+                # 还可以显示持仓盈亏
+                pnl_pct = (price - cost) / cost if cost > 0 else 0
+                status_msg += f"({pnl_pct:+.1%})"
+            else:
+                if pct < BUY_DIP_PCT: status_msg = "🔥超跌关注"
+                else: status_msg = "监控中"
+
+            # 拼接这一行
+            # {name[:4]} 截取前4个字防止名字太长导致表格错位
+            row = f"{stock:<10} | {name[:4]:<8} | {price:<8.2f} | {pct:<+8.2%} | {atr_str:<6} | {status_msg}"
+            lines.append(row)
+
+        lines.append("=" * 65)
+        
+        # 4. 执行清屏与打印
+        # Windows 使用 'cls'，Mac/Linux 使用 'clear'
+        os.system('cls') 
+        print("\n".join(lines))
 
     def start(self):
         mode_str = "模拟盘(Input/Current CSV)" if SIMULATION else "实盘(QMT账户 + Input CSV)"
@@ -443,7 +513,7 @@ class RobustStrategy:
         ticks = xtdata.get_full_tick(stock_list)
         
         quota_left = MAX_DAILY_BUY_AMOUNT - self.data['daily_buy_total']
-        print(f"\r[{now_time}] 模式:{'SIM' if SIMULATION else 'REAL'} | 大盘:{m_pct:.2%} | 额度:{quota_left:.0f} | 监控:{len(stock_list)}只", end="")
+        self.print_dashboard(now_time, m_pct, quota_left, stock_list, ticks)
 
         for stock in stock_list:
             if stock not in ticks: continue
