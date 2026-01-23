@@ -66,6 +66,11 @@ class PositionManager:
             self.init_sim_data()
             print(f">>> [模拟] 已加载最新持仓文件， 共 {len(self.sim_positions)} 只股票")
             
+    def normalize_code(self, code):
+        code = str(code).strip()
+        if '.' in code: return code
+        return f"{code}.SH" if code.startswith('6') else f"{code}.SZ"
+
     def load_input_csv_stocks(self):
         """仅读取 siminput.csv 中的股票代码，用于实盘监控"""
         stocks = set()
@@ -73,7 +78,8 @@ class PositionManager:
             try:
                 df = pd.read_csv(CSV_INPUT_POS, encoding='utf-8-sig')
                 if 'stock_code' in df.columns:
-                    stocks = set(df['stock_code'].astype(str).dropna().tolist())
+                    raw_codes = df['stock_code'].astype(str).dropna().tolist()
+                    stocks = set(self.normalize_code(c) for c in raw_codes) # 调用标准化函数
             except Exception as e:
                 print(f"!!! 读取 {CSV_INPUT_POS} 失败: {e}")
         return list(stocks)
@@ -88,7 +94,7 @@ class PositionManager:
                 if not df.empty and all(col in df.columns for col in ['stock_code', 'cost', 'volume']):
                     self.sim_positions.clear()
                     for _, row in df.iterrows():
-                        self.sim_positions[row['stock_code']] = {
+                        self.sim_positions[self.normalize_code(row['stock_code'])] = {
                             'volume': int(row['volume']),
                             'cost': float(row['cost'])
                         }
@@ -189,7 +195,10 @@ class PositionManager:
             data_list.append({'stock_code': s, 'cost': info['cost'], 'volume': info['volume']})
         
         df = pd.DataFrame(data_list)
-        df.to_csv(CSV_CURRENT_POS, index=False, encoding='utf-8-sig')
+        try:
+            df.to_csv(CSV_CURRENT_POS, index=False, encoding='utf-8-sig')
+        except:
+            print("!!! 警告：无法写入CSV，文件可能被Excel占用")
 
 class RobustStrategy:
     def __init__(self):
@@ -221,16 +230,12 @@ class RobustStrategy:
             today_str = datetime.datetime.now().strftime("%Y%m%d")
             
             for o in orders:
-                # 过滤出今天的买入单
                 order_date_str = ""
                 ts = o.order_time 
-
-                # 【关键步骤】将时间戳转为 "20250121" 格式的字符串
-                # 注意：如果是实盘，order_time 可能是 0 (如废单)，需要容错
                 if ts > 0:
                     order_date_str = datetime.datetime.fromtimestamp(ts).strftime("%Y%m%d")
 
-                if order_date_str.startswith(today_str) and o.order_type == xtconstant.STOCK_BUY:
+                if order_date_str == today_str and o.order_type == xtconstant.STOCK_BUY:
                     amt = o.price * o.order_volume
                     # 如果市价单price为0，尝试用成交金额
                     if amt == 0 and o.trade_amount > 0:
@@ -257,7 +262,11 @@ class RobustStrategy:
             today_str = datetime.datetime.now().strftime("%Y%m%d")
             
             for o in orders:
-                if not str(o.order_time).startswith(today_str): continue
+                order_date_str = ""
+                ts = o.order_time 
+                if ts > 0:
+                    order_date_str = datetime.datetime.fromtimestamp(ts).strftime("%Y%m%d")
+                if not order_date_str == today_str: continue
                 if o.stock_code == stock_code and o.order_type == action_type:
                     # 只要下过单(哪怕废单)，严格执行纪律，今天不再操作
                     return True 
@@ -347,9 +356,9 @@ class RobustStrategy:
                 self.sim_daily_buy += amount
         else:
             # [实盘下单] (此处保留注释，用户需手动开启)
-            # self.trader.order_stock(
-            #    self.acc, stock, action_type, int(volume), xtconstant.FIX_PRICE, trade_price, f"策略:{remark}", "0"
-            # )
+            self.trader.order_stock(
+               self.acc, stock, action_type, int(volume), xtconstant.FIX_PRICE, trade_price, f"策略:{remark}", "0"
+            )
             print(f"[实盘] 委托已发送(演示): {stock} {action_str} {trade_price:.2f}")
 
         # 5. 写日志
@@ -453,6 +462,9 @@ class RobustStrategy:
                     'low':   data_map['low'][stock],
                     'close': data_map['close'][stock]
                 })
+                
+                if len(df) > 1: df = df.iloc[:-1]  # 剔除今日未收盘数据，确保ATR稳定
+
                 df.dropna(inplace=True)
                 if len(df) < ATR_PERIOD: 
                     self.atr_map[stock] = None
@@ -631,7 +643,7 @@ class RobustStrategy:
                         reason = f"总仓止盈(>{HOLD_PROFIT_PCT:.0%})"
                     elif total_return_pct < HOLD_LOSS_PCT:
                         reason = f"总仓止损(<{HOLD_LOSS_PCT:.0%})"
-                    elif day_high_pct > dyn_prof_line:
+                    elif day_high_pct > dyn_prof_line and total_return_pct > 0.002:
                         drawdown = day_high_pct - day_pct
                         if drawdown >= TRAILING_DRAWDOWN:
                             reason = f"移动止盈(最高{day_high_pct:.1%} 回撤{drawdown:.1%})"
