@@ -1,0 +1,22 @@
+﻿# 1. Python Core
+__pycache__/
+*.py[cod]
+*$py.class
+
+# 2. Virtual Environments
+.venv/
+venv/
+env/
+dist/
+build/
+*.egg-info/
+
+# 3. Environment Secrets
+.env
+.flaskenv
+
+# 4. IDEs & Data Science
+.vscode/
+.idea/
+.ipynb_checkpoints
+.DS_Store

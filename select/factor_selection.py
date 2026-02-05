@@ -20,13 +20,7 @@ import pandas as pd
 import numpy as np
 from xtquant import xtdata
 import stock_candidates as sc
-# ================= 1. 参数配置 =================
-# 股票池：默认沪深300 (也可改为 '上证50', '中证500')
-SECTOR_NAME = '上证A股' 
-USE_SECTOR =  False
-INDEX_CODE = '000001.SH'
-# 选股数量
-TOP_N = 10
+
 # 回溯深度
 SHORTTERMDAYS = 20
 MIDTERMDAYS = 60
@@ -35,20 +29,20 @@ W_FUND = 0.4  # 基本面
 W_MOM  = 0.4  # 动量
 W_RISK = 0.2  # 风控
 
+__all__ = ['select']
+
 # ================= 2. 工具函数 =================
 
-def get_stock_list():
+def get_stock_list_from_sector(sector):
       
-    if USE_SECTOR:
-        """获取板块成分股"""
-        try:
-            stocks = xtdata.get_stock_list_in_sector(SECTOR_NAME)
-            return stocks[:50]
-        except:
-            # 备用测试列表
-            return sc.STOCKS
-    else: 
-        return sc.STOCKS
+    """获取板块成分股"""
+    try:
+        stocks = xtdata.get_stock_list_in_sector(SECTOR_NAME)
+        return stocks[:50]
+    except:
+        # 备用测试列表
+        return []
+    
 def progress_callback(data):
     """
     data: dict, e.g., {'finished': 10, 'total': 100}
@@ -241,6 +235,7 @@ def calculate_factors(stock_list):
 def get_market_sentiment():
     """识别市场环境：1-牛市, 2-熊市, 3-震荡"""
     start_date = (datetime.datetime.now() - datetime.timedelta(days=MIDTERMDAYS*2)).strftime("%Y%m%d")
+    INDEX_CODE = '000001.SH'
     xtdata.download_history_data2([INDEX_CODE], period='1d', start_time=start_date)
     # df = xtdata.get_market_data_ex(['close'], [INDEX_CODE], period='1d', count=30)[INDEX_CODE]
     # ma20 = df['close'].rolling(20).mean().iloc[-1]
@@ -317,7 +312,7 @@ def standardize_mad(df):
     return df_z
 
 
-def scoring(df):
+def scoring(df, usesector):
     if df.empty: return df
     
     # 1. 去极值 & 标准化 (Z-Score)
@@ -343,7 +338,7 @@ def scoring(df):
     weights = get_dynamic_weights(sentiment)
     
     
-    if not USE_SECTOR:
+    if not usesector:
         # 1. 基本面：质量优先 (ROE 权重加大)
         df['score_fund'] = 0.3 * (-df_z['R_PE']) + 0.7 * df_z['R_ROE']
 
@@ -365,25 +360,19 @@ def scoring(df):
                         
     return df.sort_values(by='Total_Score', ascending=False)
 
-# ================= 主程序入口 =================
 
-if __name__ == '__main__':
-    get_market_sentiment()
-    
-    print("=== 启动 xtquant 原生选股策略 ===")
-    
-    # 1. 获取名单
-    stock_pool = get_stock_list()
-    
-    # 2. 下载数据 (首次运行可能较慢)
-    check_and_download_data(stock_pool)
+# == Main entry for selection ========
+def select (stock_pool, top_n = 10, download = True, usesector = False):
+       # 2. 下载数据 (首次运行可能较慢)
+    if download:
+        check_and_download_data(stock_pool)
     
     # 3. 计算因子
     df_factors = calculate_factors(stock_pool)
     print(f"成功计算 {len(df_factors)} 只股票的因子")
     
     # 4. 打分排序
-    df_result = scoring(df_factors)
+    df_result = scoring(df_factors, usesector)
     
     # 5. 输出结果
     if not df_result.empty:
@@ -392,8 +381,25 @@ if __name__ == '__main__':
         names = [xtdata.get_instrument_detail(code).get('InstrumentName', '未知') for code in df_result.index]
         df_result.insert(0, 'name', names)
         print(df_result[['name', 'R_PE', 'R_ROE', 'R_Mom_Short','R_Mom_Mid', 'R_Vol', 'R_Bias', 'score_fund', 'score_mom', 'score_risk', 'Total_Score']])
-        
-        selected = df_result.head(TOP_N).index.tolist()
+        return  df_result.head(top_n).index.tolist()
+    return []
+# ================= 主程序入口 =================
+
+if __name__ == '__main__':    
+    print("=== 启动 xtquant 原生选股策略 ===")
+    
+    usesector = False
+    download = False
+    stock_pool = sc.STOCKS
+    # 1. 获取名单
+    if usesector:
+        stock_pool = get_stock_list_from_sector( '上证A股' )
+
+        # ================= 1. 参数配置 =================
+    # 股票池：默认沪深300 (也可改为 '上证50', '中证500')
+    selected = select(stock_pool, 10, download, usesector)
+    
+    if len(selected) > 0:
         print(f"\n最终选股列表: {selected}")
     else:
         print("未生成有效结果，请检查数据下载是否成功。")
