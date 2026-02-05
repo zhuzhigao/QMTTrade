@@ -385,21 +385,22 @@ def select (stock_pool, top_n = 10, download = True, usesector = False):
     return []
 # ================= 主程序入口 =================
 
-if __name__ == '__main__':    
-    print("=== 启动 xtquant 原生选股策略 ===")
+# if __name__ == '__main__':    
+#     print("=== 启动 xtquant 原生选股策略 ===")
     
-    usesector = False
-    download = False
-    stock_pool = sc.STOCKS
-    # 1. 获取名单
-    if usesector:
-        stock_pool = get_stock_list_from_sector( '上证A股' )
+#     usesector = False
+#     download = False
+#     stock_pool = STOCKS = ['301308.SZ', '603986.SH', '002920.SZ', '002555.SZ', '601919.SH', '601857.SH', '601788.SH', '600887.SH', '601898.SH', '600886.SH', '600900.SH', '688981.SH', '688126.SH', '002371.SZ', '002202.SZ', '601633.SH', '300750.SZ', '002594.SZ', '601360.SH', '601601.SH', '601600.SH', '600941.SH', '601988.SH', '600050.SH', '300274.SZ']
 
-        # ================= 1. 参数配置 =================
-    # 股票池：默认沪深300 (也可改为 '上证50', '中证500')
-    selected = select(stock_pool, 10, download, usesector)
+#     # 1. 获取名单
+#     if usesector:
+#         stock_pool = get_stock_list_from_sector( '上证A股' )
+
+#         # ================= 1. 参数配置 =================
+#     # 股票池：默认沪深300 (也可改为 '上证50', '中证500')
+#     selected = select(stock_pool, 10, download, usesector)
     
-    if len(selected) > 0:
-        print(f"\n最终选股列表: {selected}")
-    else:
-        print("未生成有效结果，请检查数据下载是否成功。")
+#     if len(selected) > 0:
+#         print(f"\n最终选股列表: {selected}")
+#     else:
+#         print("未生成有效结果，请检查数据下载是否成功。")
