@@ -4,7 +4,9 @@ import datetime
 from xtquant import xtdata
 from xtquant.xttrader import XtQuantTrader
 from xtquant.xttype import StockAccount
-
+   #print("=== 正在加载选股模块 ===")
+from factor_selection import select
+    #print("=== 完成加载选股模块 ===")
 # ================= 配置区 =================
 ACC_ID = '47601131'
 QMT_PATH = r'D:\光大证券金阳光QMT实盘\userdata_mini' # 请确保路径正确
@@ -82,15 +84,14 @@ def order_stock(xt_trader: XtQuantTrader, acc, stock, order_type, order_volume, 
     #                           price=price)
     return 
 def run_strategy():
- 
+    
     sentiment = get_market_sentiment(SHORTTERM_DAYS)
-    time.sleep(2) # 关键：给 IPC 通道 2 秒钟的稳固时间
+    print('稳固IPC通道：10s')
+    time.sleep(10) # 关键：给 IPC 通道 10 秒钟的稳固时间
     
     # 【核心改动】在通道稳定后，再进行局部导入
-    print("=== 正在加载选股模块 ===")
-    from factor_selection import select
-    print("=== 完成加载选股模块 ===")
-
+ 
+    print('开始选股')
      # 获取排名切片
     selected = select(stock_pool=STOCK_POOL, sector="", top_n= CHECK_COUNT, download=True, sdays=SHORTTERM_DAYS, mdays=MIDTERM_DAYS, sentiment=sentiment)
     print("选中股票")
