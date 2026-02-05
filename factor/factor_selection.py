@@ -61,7 +61,7 @@ def check_and_download_data(stock_list, mdays = 60):
     print(f">> 正在下载行情数据 (从 {start_date} 开始)...")
     
     # 修复点：使用循环逐个下载
-    xtdata.download_history_data2(stock_list, period='1d', start_time=start_date, end_time='', callback=progress_callback)
+    xtdata.download_history_data2(stock_list, period='1d', start_time=start_date, end_time='')
     
     print(">> 正在下载财务数据...")
     # 财务数据通常支持列表下载，但如果也报错，同样改为循环
@@ -75,7 +75,7 @@ def check_and_download_data(stock_list, mdays = 60):
             # 'Top10holder'      #十大股东
             # 'Top10flowholder'  #十大流通股东
             'Pershareindex'    #每股指标
-        ], callback=progress_callback)
+        ])
     except TypeError:
         # 如果财务下载也报同样的错，启用下面的备用方案
         for stock in stock_list:
@@ -366,7 +366,7 @@ if __name__ == '__main__':
     print("=== 启动 xtquant 原生选股策略 ===")
     
     usesector = False
-    download = False
+    download = True
     stock_pool = STOCKS = ['301308.SZ', '603986.SH', '002920.SZ', '002555.SZ', '601919.SH', '601857.SH', '601788.SH', '600887.SH', '601898.SH', '600886.SH', '600900.SH', '688981.SH', '688126.SH', '002371.SZ', '002202.SZ', '601633.SH', '300750.SZ', '002594.SZ', '601360.SH', '601601.SH', '601600.SH', '600941.SH', '601988.SH', '600050.SH', '300274.SZ']
 
     # 1. 获取名单
