@@ -17,6 +17,7 @@ STOCK_POOL = ['301308.SZ', '603986.SH', '002920.SZ', '002555.SZ', '601919.SH', '
               '601898.SH', '600886.SH', '600900.SH', '688981.SH', '688126.SH', '002371.SZ', '002202.SZ', '601633.SH', 
               '300750.SZ', '002594.SZ','601360.SH', '601601.SH', '601600.SH', '600941.SH', '601988.SH', '600050.SH', 
               '300274.SZ']
+IGNORE_POOL = ['515100.SH', '888880.SH', '000423.SZ', '159887.SZ', '601919.SH']
 
 # 2. 策略核心参数
 BUYIN_COUNT = 6          # 目标持股数
@@ -86,14 +87,18 @@ def order_stock(xt_trader: XtQuantTrader, acc, stock, order_type, order_volume, 
 def run_strategy():
     
     sentiment = get_market_sentiment(SHORTTERM_DAYS)
-    print('稳固IPC通道：10s')
-    time.sleep(10) # 关键：给 IPC 通道 10 秒钟的稳固时间
-    
+    download = False
+    if download:
+        print('稳固IPC通道：10s')
+        time.sleep(10) # 关键：给 IPC 通道 10 秒钟的稳固时间
+        
     # 【核心改动】在通道稳定后，再进行局部导入
  
     print('开始选股')
+    #处理ignore list
+    stock_candidates = list(set(STOCK_POOL) - set(IGNORE_POOL))
      # 获取排名切片
-    selected = select(stock_pool=STOCK_POOL, sector="", top_n= CHECK_COUNT, download=True, sdays=SHORTTERM_DAYS, mdays=MIDTERM_DAYS, sentiment=sentiment)
+    selected = select(stock_pool=stock_candidates, sector="", top_n= CHECK_COUNT, download=download, sdays=SHORTTERM_DAYS, mdays=MIDTERM_DAYS, sentiment=sentiment)
     print("选中股票")
     print(selected)
  
@@ -110,7 +115,9 @@ def run_strategy():
     pos_res = xt_trader.query_stock_positions(acc)
     # 持仓字典 {代码: {可用数量, 成本价}}
     holdings = {p.stock_code: {'vol': p.can_use_volume, 'cost': p.open_price} for p in pos_res if p.volume > 0}
-
+    # 2. 剔除 IGNORE_POOL 中的股票
+    holdings = {k: v for k, v in holdings.items() if k not in IGNORE_POOL}
+    
     # ---- 3. 计算目标金额 (受大盘环境影响) ----
     multiplier = get_market_pos_multiplier(sentiment)
     # total_logic_vol = asset.total_asset * multiplier
@@ -147,15 +154,21 @@ def run_strategy():
     for stock in top_buyin:
         if stock not in holdings:
             tick = xtdata.get_full_tick([stock])[stock]
-            # 避开涨停
+            # 停牌判断
+            if tick['lastPrice'] <= 0 or tick['high'] == 0:
+                print(f"【跳过】{stock} 当前处于停牌状态，取消买入")
+                continue
+                # 避开涨停
             if tick['lastPrice'] < tick['high']:
                 buy_vol = int(single_target_value / tick['lastPrice'] / 100) * 100
+                stock_name = selected.at[stock, selected.columns[0]] if stock in selected.index else "N/A"
                 if buy_vol >= 100:
-                    stock_name = selected.at[stock, selected.columns[0]] if stock in selected.index else "N/A"
                     print(f"【买入】{stock}: {stock_name} 排名进入前{BUYIN_COUNT}，数量: {buy_vol}")
                     order_stock(xt_trader, acc, stock, 23, buy_vol, 11, 0)
+                else:
+                    print(f"【跳过】【买入】{stock}: {stock_name} 不足一手，数量: {int(single_target_value / tick['lastPrice'])}")
             else:
-                print(f"【跳过】{stock} 封涨停中，不追高")
+                print(f"【跳过】【买入】 {stock} 封涨停中，不追高")
 
     print(">>> 调仓任务执行完毕")
 
