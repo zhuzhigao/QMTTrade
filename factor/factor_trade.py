@@ -1,6 +1,8 @@
 # -*- coding: utf-8 -*-
 import time
 import datetime
+import os
+import json
 from xtquant import xtdata
 from xtquant.xttrader import XtQuantTrader
 from xtquant.xttype import StockAccount
@@ -28,6 +30,22 @@ TOTAL_ASSET = 60000      # 交易资产数
 MIDTERM_DAYS = 60
 SHORTTERM_DAYS = 20
 
+DATA_FILE = 'factor_trade.data'
+
+def load_managed_stocks():
+    """读取程序买入的股票列表"""
+    if os.path.exists(DATA_FILE):
+        try:
+            with open(DATA_FILE, 'r') as f:
+                return json.load(f)
+        except:
+            return []
+    return []
+
+def save_managed_stocks(stock_list):
+    """保存程序买入的股票列表"""
+    with open(DATA_FILE, 'w') as f:
+        json.dump(list(set(stock_list)), f) # 去重保存
 # ================= 核心功能函数 =================
 
 def get_market_sentiment(sentiment_duration: int):
@@ -77,13 +95,13 @@ def get_market_pos_multiplier(sentiment: int):
     
 def order_stock(xt_trader: XtQuantTrader, acc, stock, order_type, order_volume, price_type, price):
     # if not SIMUMLATION:
-    #     xt_trader.order_stock(acc, 
+    #     return xt_trader.order_stock(acc, 
     #                           stock_code=stock, 
     #                           order_type=order_type, 
     #                           order_volume=order_volume, 
     #                           price_type= price_type, 
     #                           price=price)
-    return 
+    return -1
 def run_strategy():
     
     sentiment = get_market_sentiment(SHORTTERM_DAYS)
@@ -128,9 +146,12 @@ def run_strategy():
     selected_stocks = selected.index.tolist()
     top_buyin = selected_stocks[:BUYIN_COUNT]
     top_check = selected_stocks[:CHECK_COUNT]
-
+    
+    managed_stocks = load_managed_stocks()
     # ---- 4. 卖出逻辑 (末位淘汰 + 硬止损) ----
     for stock, info in holdings.items():
+        if stock not in managed_stocks:
+            continue
         # 获取当前价计算止损
         tick = xtdata.get_full_tick([stock])[stock]
         last_price = tick['lastPrice']
@@ -140,12 +161,20 @@ def run_strategy():
         # 卖出条件 A: 掉出排名考量池
         if stock not in top_check:
             print(f"【淘汰】{stock}: {stock_name} 跌出前{CHECK_COUNT}名，全额卖出")
-            order_stock(xt_trader, acc, stock, 12, info['vol'], 11, 0)
+            res = order_stock(xt_trader, acc, stock, 12, info['vol'], 11, 0)
+            if res != -1: # 委托发送成功（或根据 QMT 返回值判断）
+                managed_stocks.remove(stock)
+                save_managed_stocks(managed_stocks)
+                print(f"【同步成功】已从 {DATA_FILE} 中移除 {stock}")
             
         # 卖出条件 B: 硬止损触发
         elif drawdown <= -DRAWBACK_PCT:
-            print(f"【止损】{stock}: {stock_name} 亏损达 {drawdown:.2f}%，触发硬止损")
-            order_stock(xt_trader, acc, stock, 12, info['vol'], 11, 0)
+            print(f"【止损】{stock}: {stock_name} 亏损达 {drawdown:.2f}%，触发硬止损")         
+            res = order_stock(xt_trader, acc, stock, 12, info['vol'], 11, 0)
+            if res != -1: # 委托发送成功（或根据 QMT 返回值判断）
+                managed_stocks.remove(stock)
+                save_managed_stocks(managed_stocks)
+                print(f"【同步成功】已从 {DATA_FILE} 中移除 {stock}")
 
     # 等待成交同步
     time.sleep(2)
@@ -164,7 +193,12 @@ def run_strategy():
                 stock_name = selected.at[stock, selected.columns[0]] if stock in selected.index else "N/A"
                 if buy_vol >= 100:
                     print(f"【买入】{stock}: {stock_name} 排名进入前{BUYIN_COUNT}，数量: {buy_vol}")
-                    order_stock(xt_trader, acc, stock, 23, buy_vol, 11, 0)
+                    res = order_stock(xt_trader, acc, stock, 23, buy_vol, 11, 0)
+                    if res != -1:
+                        # 买入成功，记录到 managed_stocks
+                        managed_stocks.append(stock)
+                        save_managed_stocks(managed_stocks)
+                        print(f"【同步成功】已记录 {stock} 到 {DATA_FILE}")
                 else:
                     print(f"【跳过】【买入】{stock}: {stock_name} 不足一手，数量: {int(single_target_value / tick['lastPrice'])}")
             else:
