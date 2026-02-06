@@ -135,6 +135,17 @@ def run_strategy():
     holdings = {p.stock_code: {'vol': p.can_use_volume, 'cost': p.open_price} for p in pos_res if p.volume > 0}
     # 2. 剔除 IGNORE_POOL 中的股票
     holdings = {k: v for k, v in holdings.items() if k not in IGNORE_POOL}
+
+    actual_holdings_codes = list(holdings.keys())
+   
+    managed_stocks = load_managed_stocks()
+    # 清理之前记录的股票里头已经卖出的
+    dirty_data = [s for s in managed_stocks if s not in actual_holdings_codes]
+    if dirty_data:
+        print(f"【数据同步】发现手动卖出或数据残留: {dirty_data}，正在清理...")
+        for s in dirty_data:
+            managed_stocks.remove(s)
+        save_managed_stocks(managed_stocks)   
     
     # ---- 3. 计算目标金额 (受大盘环境影响) ----
     multiplier = get_market_pos_multiplier(sentiment)
@@ -147,7 +158,7 @@ def run_strategy():
     top_buyin = selected_stocks[:BUYIN_COUNT]
     top_check = selected_stocks[:CHECK_COUNT]
     
-    managed_stocks = load_managed_stocks()
+    #todo: 隐患一： "止损后的无限回补" 死循环（最危险！）
     # ---- 4. 卖出逻辑 (末位淘汰 + 硬止损) ----
     for stock, info in holdings.items():
         if stock not in managed_stocks:
