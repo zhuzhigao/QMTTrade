@@ -19,7 +19,6 @@ import datetime
 import pandas as pd
 import numpy as np
 from xtquant import xtdata
-import stock_candidates as sc
 
 # 权重配置
 W_FUND = 0.4  # 基本面
