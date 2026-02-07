@@ -3,7 +3,10 @@ import pandas as pd
 import numpy as np
 from xtquant import xtdata
 import datetime
+import matplotlib.pyplot as plt
+import platform
 from factor_selection import select  # 请确保 select 已支持 end_time 参数
+from factor_lib import get_market_sentiment, shift_date
 
 # ================= 强化回测配置 =================
 STOCK_POOL = ['301308.SZ', '603986.SH', '002920.SZ', '002555.SZ', '601919.SH', '601857.SH', '601788.SH', '600887.SH', 
@@ -11,7 +14,7 @@ STOCK_POOL = ['301308.SZ', '603986.SH', '002920.SZ', '002555.SZ', '601919.SH', '
               '300750.SZ', '002594.SZ','601360.SH', '601601.SH', '601600.SH', '600941.SH', '601988.SH', '600050.SH', 
               '300274.SZ']
 
-START_DATE = '20250101'
+START_DATE = '20230101'
 END_DATE = '20251231'
 INIT_CASH = 600000.0      # 设置为你的实盘金额 6万
 BUYIN_COUNT = 6          # 持股6只
@@ -20,29 +23,28 @@ FEE_RATE = 0.0001        # 万1手续费
 MIN_FEE = 5.0            # 每笔最低5元
 SLIPPAGE = 0.0005        # 万5滑点
 
-def shift_date(date_str, n):
-    """
-    根据给定的日期字符串加减 n 天
-    :param date_str: 初始日期字符串，格式为 '20250101'
-    :param n: 加减的天数，正数为加，负数为减
-    :return: 处理后的日期字符串，格式为 '20250101'
-    """
-    try:
-        # 1. 将字符串解析为 datetime 对象
-        dt_obj = datetime.datetime.strptime(date_str, '%Y%m%d')
-        
-        # 2. 使用 timedelta 进行天数加减
-        new_date_obj = dt_obj + datetime.timedelta(days=n)
-        
-        # 3. 将结果转回字符串格式
-        return new_date_obj.strftime('%Y%m%d')
-    except Exception as e:
-        print(f"日期转换错误: {e}")
-        return date_str
+BENCHMARK = '000300.SH'  # 沪深300
+
+# 自动选择系统支持的中文核心字体
+def set_plt_font():
+    system = platform.system()
+    if system == "Windows":
+        # Windows 优先使用微软雅黑，其次是黑体
+        plt.rcParams['font.sans-serif'] = ['Microsoft YaHei', 'SimHei', 'SimSun', 'STFloat']
+    elif system == "Darwin":  # Mac 系统
+        plt.rcParams['font.sans-serif'] = ['Arial Unicode MS', 'PingFang SC']
+    else:  # Linux 系统
+        plt.rcParams['font.sans-serif'] = ['WenQuanYi Micro Hei']
+    
+    # 解决负号显示为方块的问题
+    plt.rcParams['axes.unicode_minus'] = False
+
+set_plt_font()
 
 def run_professional_backtest():
     # 1. 预下载数据
-    #xtdata.download_history_data2(STOCK_POOL, '1d', START_DATE, END_DATE)
+    #xtdata.download_history_data2(STOCK_POOL+ [BENCHMARK], '1d', START_DATE, END_DATE)
+
     trading_days = xtdata.get_trading_calendar('SH', START_DATE, END_DATE)
     
     # 2. 账户初始化
@@ -54,8 +56,9 @@ def run_professional_backtest():
     print(f"开始回测：账户资金 {INIT_CASH} 元，每 {REBALANCE_FREQ} 天调仓...")
 
     for i, dt_str in enumerate(trading_days):
-        
-        daily_prices = xtdata.get_market_data_ex(['close', 'high', 'low'], STOCK_POOL, '1d', start_time=dt_str, end_time=shift_date(dt_str, 1), dividend_type = 'front')
+        daily_prices = xtdata.get_market_data_ex(
+            ['close', 'high', 'low'], STOCK_POOL, '1d', 
+            start_time=dt_str, end_time=shift_date(dt_str, 2), dividend_type = 'front')
 
         # A. 计算当日市值
         market_value = 0
@@ -72,7 +75,8 @@ def run_professional_backtest():
             # --- 选股逻辑 (规避未来函数) ---
             # 传入当前的 dt_str，让 select 函数只用今天之前的数据
             try:
-                selected_df = select(stock_pool=STOCK_POOL, at_date=dt_str, sector= False, top_n=10, download=False, sentiment=3, output= False)
+                selected_df = select(stock_pool=STOCK_POOL, at_date=dt_str, sector= False, top_n=10, download=False, 
+                                     sentiment=get_market_sentiment(BENCHMARK, dt_str), output= False)
                 top_targets = selected_df.index.tolist()[:BUYIN_COUNT]
             except Exception as e:
                 print(f"[{dt_str}] 选股出错: {e}")
@@ -133,7 +137,65 @@ def run_professional_backtest():
     print(f"累计缴纳手续费: {total_fees:.2f} 元")
     print(f"手续费占初始资金比: {(total_fees/INIT_CASH)*100:.2f}%")
     print("="*30)
+
+# 【修正1】强制将策略结果的索引统一为 8 位字符串
+    res.index = res.index.map(lambda x: str(x)[:8])
     
+    # 获取沪深300基准
+    benchmark_dict = xtdata.get_market_data_ex(['close'], [BENCHMARK], period='1d', start_time=START_DATE, end_time=END_DATE)
+    
+    if BENCHMARK in benchmark_dict and not benchmark_dict[BENCHMARK].empty:
+        benchmark_data = benchmark_dict[BENCHMARK]
+        
+        # 【修正2】强制将基准数据的索引也统一为 8 位字符串
+        benchmark_data.index = benchmark_data.index.map(lambda x: str(x)[:8])
+        
+        # 【修正3】使用对齐后的索引进行 reindex，并增加 bfill() 确保第一天有值
+        res['benchmark_close'] = benchmark_data['close'].reindex(res.index).ffill().bfill()
+        
+        # 计算净值与回撤
+        res['strategy_cum'] = res['asset'] / INIT_CASH
+        res['benchmark_cum'] = res['benchmark_close'] / res['benchmark_close'].iloc[0]
+        
+        res['strategy_dd'] = (res['strategy_cum'] / res['strategy_cum'].cummax() - 1) * 100
+        res['benchmark_dd'] = (res['benchmark_cum'] / res['benchmark_cum'].cummax() - 1) * 100
+    else:
+        print(f"警告：基准 {BENCHMARK} 数据获取为空，请检查是否下载数据")
+        res['strategy_cum'] = res['asset'] / INIT_CASH
+        res['benchmark_cum'] = 1.0
+        res['strategy_dd'] = (res['strategy_cum'] / res['strategy_cum'].cummax() - 1) * 100
+        res['benchmark_dd'] = 0.0
+
+    total_ret = (res['strategy_cum'].iloc[-1] - 1) * 100
+    mdd = res['strategy_dd'].min()
+    
+    # 4. 图形化展示 (保持逻辑不变)
+    fig, (ax1, ax2) = plt.subplots(2, 1, figsize=(12, 10), sharex=True, gridspec_kw={'height_ratios': [2, 1]})
+    
+    # 子图1：收益曲线
+    ax1.plot(res.index, res['strategy_cum'], label='策略 (4-4-2)', color='#e63946', linewidth=2)
+    ax1.plot(res.index, res['benchmark_cum'], label='沪深300 (基准)', color='#457b9d', linestyle='--', alpha=0.7)
+    ax1.set_title(f'策略收益曲线对比 ({START_DATE} - {END_DATE})', fontsize=14)
+    ax1.set_ylabel('累计净值', fontsize=12)
+    ax1.legend()
+    ax1.grid(True, alpha=0.3)
+    
+    # 子图2：回撤曲线
+    ax2.fill_between(res.index, res['strategy_dd'], 0, facecolor='#e63946', alpha=0.3, label='策略回撤')
+    ax2.plot(res.index, res['benchmark_dd'], label='基准回撤', color='#457b9d', linewidth=1, alpha=0.7)
+    ax2.set_title('动态回撤对比 (%)', fontsize=12)
+    ax2.set_ylabel('回撤幅度 (%)', fontsize=12)
+    ax2.set_xlabel('日期', fontsize=12)
+    ax2.legend()
+    ax2.grid(True, alpha=0.3)
+    
+    # 优化日期显示
+    plt.xticks(res.index[::15], rotation=45)
+    plt.tight_layout()
+    # plt.savefig('backtest_result.png')
+    # print("\n>>> 图形报告已生成: backtest_result.png")
+    plt.show()
+
     return res
 
 if __name__ == "__main__":

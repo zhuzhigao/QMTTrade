@@ -8,6 +8,7 @@ from xtquant.xttrader import XtQuantTrader
 from xtquant.xttype import StockAccount
    #print("=== 正在加载选股模块 ===")
 from factor_selection import select
+from factor_lib import get_market_sentiment
     #print("=== 完成加载选股模块 ===")
 # ================= 配置区 =================
 ACC_ID = '47601131'
@@ -19,17 +20,17 @@ STOCK_POOL = ['301308.SZ', '603986.SH', '002920.SZ', '002555.SZ', '601919.SH', '
               '601898.SH', '600886.SH', '600900.SH', '688981.SH', '688126.SH', '002371.SZ', '002202.SZ', '601633.SH', 
               '300750.SZ', '002594.SZ','601360.SH', '601601.SH', '601600.SH', '600941.SH', '601988.SH', '600050.SH', 
               '300274.SZ']
+#IGNORE_POOL = []
 IGNORE_POOL = ['515100.SH', '888880.SH', '000423.SZ', '159887.SZ', '601919.SH']
 
 # 2. 策略核心参数
 BUYIN_COUNT = 6          # 目标持股数
 CHECK_COUNT = 10         # 考量池大小（跌出前10名卖出）
 DRAWBACK_PCT = 10.0      # 硬性止损百分比
-INDEX_CODE = '000001.SH' # 大盘参照：上证指数
+BENCHMARK = '000300.SH' # 大盘参照：上证指数
 TOTAL_ASSET = 60000      # 交易资产数
 MIDTERM_DAYS = 60
 SHORTTERM_DAYS = 20
-
 DATA_FILE = 'factor_trade.data'
 
 def load_managed_stocks():
@@ -47,40 +48,6 @@ def save_managed_stocks(stock_list):
     with open(DATA_FILE, 'w') as f:
         json.dump(list(set(stock_list)), f) # 去重保存
 # ================= 核心功能函数 =================
-
-def get_market_sentiment(sentiment_duration: int):
-    """识别市场环境：1-牛市, 2-熊市, 3-震荡"""
-    start_date = (datetime.datetime.now() - datetime.timedelta(days=MIDTERM_DAYS*2)).strftime("%Y%m%d")
-    INDEX_CODE = '000001.SH'
-    xtdata.download_history_data2([INDEX_CODE], period='1d', start_time=start_date)
-    # df = xtdata.get_market_data_ex(['close'], [INDEX_CODE], period='1d', count=30)[INDEX_CODE]
-    # ma20 = df['close'].rolling(20).mean().iloc[-1]
-    
-    market_data = xtdata.get_market_data(
-        field_list=['close'], 
-        stock_list=[INDEX_CODE], 
-        period='1d', 
-        count=MIDTERM_DAYS + SHORTTERM_DAYS, 
-        dividend_type='front' # 前复权
-    )
-    # 提取 close 数据表
-    df_close = market_data.get('close')
-    index_series = df_close.loc[INDEX_CODE] # 提取上证指数这一行，变成 Series
-
-    # 此时 index_series 的索引是日期，值是收盘价
-    # 计算 20 日均线
-    ma20 = index_series.rolling(sentiment_duration).mean().iloc[-1]
-    current_price = index_series.iloc[-1]
-    
-    # 简单判定逻辑
-    if current_price > ma20 * 1.02: 
-        print('牛市')
-        return 1 # 牛市：价在均线上方
-    if current_price < ma20 * 0.98: 
-        print('熊市')
-        return 2 # 熊市：价在均线下方
-    print('震荡市')
-    return 3 # 震荡
 
 def get_market_pos_multiplier(sentiment: int):
     multi = 0.8
@@ -102,9 +69,10 @@ def order_stock(xt_trader: XtQuantTrader, acc, stock, order_type, order_volume, 
     #                           price_type= price_type, 
     #                           price=price)
     return -1
-def run_strategy():
-    
-    sentiment = get_market_sentiment(SHORTTERM_DAYS)
+def run_strategy():  
+    tradedate = datetime.date.today().strftime('%Y%m%d')
+    #tradedate = '20250101'
+    sentiment = get_market_sentiment(BENCHMARK, tradedate, SHORTTERM_DAYS)
     download = False
     if download:
         print('稳固IPC通道：10s')
@@ -116,7 +84,8 @@ def run_strategy():
     #处理ignore list
     stock_candidates = list(set(STOCK_POOL) - set(IGNORE_POOL))
      # 获取排名切片
-    selected = select(stock_pool=stock_candidates, sector="", top_n= CHECK_COUNT, download=download, sdays=SHORTTERM_DAYS, mdays=MIDTERM_DAYS, sentiment=sentiment)
+    selected = select(stock_pool=stock_candidates, at_date= tradedate, sector="", top_n= CHECK_COUNT, download=download, sdays=SHORTTERM_DAYS, mdays=MIDTERM_DAYS, sentiment=sentiment)
+    #selected = select(stock_pool=stock_candidates, at_date= '20250101', sector="", top_n= CHECK_COUNT, download=download, sdays=SHORTTERM_DAYS, mdays=MIDTERM_DAYS, sentiment=sentiment)
     print("选中股票")
     print(selected)
  
