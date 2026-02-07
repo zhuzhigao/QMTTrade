@@ -61,7 +61,7 @@ def check_and_download_data(stock_list, mdays = 60):
     print(f">> 正在下载行情数据 (从 {start_date} 开始)...")
     
     # 修复点：使用循环逐个下载
-    xtdata.download_history_data2(stock_list, period='1d', start_time=start_date, end_time='', callback=progress_callback)
+    xtdata.download_history_data2(stock_list + ['000001.SH', '000300.SH'], period='1d', start_time=start_date, end_time='', callback=progress_callback)
     
     print(">> 正在下载财务数据...")
     # 财务数据通常支持列表下载，但如果也报错，同样改为循环
