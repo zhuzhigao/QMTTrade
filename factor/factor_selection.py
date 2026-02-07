@@ -82,38 +82,30 @@ def check_and_download_data(stock_list, mdays = 60):
              xtdata.download_financial_data([stock])
 
 # ================= 3. 核心计算逻辑 (已修复转置问题) =================
-def calculate_factors(stock_list, sdays = 20, mdays = 60):
+def calculate_factors(stock_list, at_date: str, sdays = 20, mdays = 60, ):
     """
     计算因子核心函数 (Updated)
     逻辑: 40%基本面 + 40%动量 + 20%风控
     """
-    print(f">> 开始计算 {len(stock_list)} 只股票的因子...")
-    
+    print(f">> 开始计算 {at_date} {len(stock_list)} 只股票的因子...")
+
+        # 1. 将字符串转为 datetime 对象
+    dt_obj = datetime.datetime.strptime(at_date, '%Y%m%d')
+    # 2. 使用 timedelta 增加一天
+    lookback_day_obj = dt_obj + datetime.timedelta(days= - (mdays + sdays))
+    # 3. 将新的日期对象转回字符串
+    lookback_dt_str = lookback_day_obj.strftime('%Y%m%d')
     # ================= 1. 获取行情数据 (Technical) =================
     # 获取收盘价，用于计算动量、波动率、乖离率以及估值(PE)
-    market_data = xtdata.get_market_data(
+    market_data = xtdata.get_market_data_ex(
         field_list=['close'], 
         stock_list=stock_list, 
         period='1d', 
-        count=mdays + sdays, 
+        end_time= at_date,
+        count= mdays +sdays,
         dividend_type='front' # 前复权
     )
     
-    # 提取 close 数据表
-    df_close = market_data.get('close')
-    
-    # [修复1] 空数据检查
-    if df_close is None or df_close.empty:
-        print("❌ 错误：未获取到行情数据，请检查 MiniQMT 是否登录。")
-        return pd.DataFrame()
-
-    # [修复2] 维度转置自适应
-    # 我们需要的格式是：行(Index)=日期, 列(Columns)=股票代码
-    # 如果发现股票代码跑到了 Index 上，就转置一下
-    if len(stock_list) > 0 and stock_list[0] in df_close.index:
-        print("   (检测到数据需要转置: Rows=Stocks -> Rows=Dates)")
-        df_close = df_close.T
-
     # ================= 2. 获取财务数据 (Fundamental) =================
     # 使用 PershareIndex 表
     financial_data = xtdata.get_financial_data(
@@ -135,11 +127,11 @@ def calculate_factors(stock_list, sdays = 20, mdays = 60):
 
     for stock in stock_list:
         try:
-            # --- A. 技术面计算 (基于 df_close) ---
+            # --- A. 技术面计算 ---
             
             # 安全获取该股序列
-            if stock not in df_close.columns: continue
-            closes_series = df_close[stock]
+            if stock not in market_data: continue
+            closes_series = market_data[stock]['close']
             
             # 转 numpy 数组并清洗 NaN
             closes = closes_series.dropna().values
@@ -334,7 +326,7 @@ def scoring(df, usesector, sentiment: int):
 # sdays： 短线看多少天
 # mdays: 中线看多少天
 # sentiment:市场状态：牛市1，熊市2还是震荡3
-def select (stock_pool, sector, top_n = 10, download = True, sdays = 20, mdays= 60, sentiment = 3):
+def select (stock_pool, sector, at_date: str, top_n = 10, download = True, sdays = 20, mdays= 60, sentiment = 3, output = True):
     usesector = stock_pool is None or len(stock_pool) == 0
     if usesector:
         stock_pool = get_stock_list_from_sector(sector)
@@ -344,7 +336,8 @@ def select (stock_pool, sector, top_n = 10, download = True, sdays = 20, mdays= 
         check_and_download_data(stock_pool, mdays)
     
     # 3. 计算因子
-    df_factors = calculate_factors(stock_pool, sdays, mdays)
+
+    df_factors = calculate_factors(stock_pool, at_date, sdays, mdays)
     print(f"成功计算 {len(df_factors)} 只股票的因子")
     
     # 4. 打分排序
@@ -356,7 +349,8 @@ def select (stock_pool, sector, top_n = 10, download = True, sdays = 20, mdays= 
         # 打印展示列：总分、PE(估值)、ROE(质量)、Mom(动量)
         names = [xtdata.get_instrument_detail(code).get('InstrumentName', '未知') for code in df_result.index]
         df_result.insert(0, 'name', names)
-        print(df_result[['name', 'R_PE', 'R_ROE', 'R_Mom_Short','R_Mom_Mid', 'R_Vol', 'R_Bias', 'score_fund', 'score_mom', 'score_risk', 'Total_Score']])
+        if output:
+            print(df_result[['name', 'R_PE', 'R_ROE', 'R_Mom_Short','R_Mom_Mid', 'R_Vol', 'R_Bias', 'score_fund', 'score_mom', 'score_risk', 'Total_Score']])
         return  df_result.iloc[:top_n, [0]]
     return []
 
