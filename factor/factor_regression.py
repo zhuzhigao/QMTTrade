@@ -45,7 +45,12 @@ def run_professional_backtest():
     # 1. 预下载数据
     #xtdata.download_history_data2(STOCK_POOL+ [BENCHMARK], '1d', START_DATE, END_DATE)
 
-    trading_days = xtdata.get_trading_calendar('SH', START_DATE, END_DATE)
+    # 获取交易日列表 (第一个参数是市场代码，SH 或 SZ)
+    # 注意：返回的是毫秒时间戳或整数日期，取决于版本
+    trading_dates = xtdata.get_trading_dates('SH', start_time=START_DATE, end_time=END_DATE)
+
+    # 转换成 YYYYMMDD 字符串列表，方便后续使用
+    trading_days = [datetime.datetime.fromtimestamp(d/1000).strftime('%Y%m%d') for d in trading_dates]
     
     # 2. 账户初始化
     cash = INIT_CASH
