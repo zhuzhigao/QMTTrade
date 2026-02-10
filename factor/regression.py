@@ -1,91 +1,129 @@
-import sys
-import pandas as pd
+# -*- coding: utf-8 -*-
 import backtrader_next as bt
+import pandas as pd
 from datetime import datetime
 from xtquant import xtdata
+from factor_selection import select
+from factor_lib import get_market_sentiment
 
+STOCK_POOL = ['301308.SZ', '603986.SH', '002920.SZ', '002555.SZ', '601919.SH', '601857.SH', '601788.SH', '600887.SH', 
+                          '601898.SH', '600886.SH', '600900.SH', '688981.SH', '688126.SH', '002371.SZ', '002202.SZ', '601633.SH', 
+                          '300750.SZ', '002594.SZ','601360.SH', '601601.SH', '601600.SH', '600941.SH', '601988.SH', '600050.SH', 
+                          '300274.SZ']
+# ================= 1. 手续费模型 (最低5元) =================
+class QMT_Stock_Comm(bt.CommInfoBase):
+    params = (
+        ('commission', 0.0001), # 万1
+        ('min_fee', 5.0),       # 最低5元
+        ('stocklike', True),
+    )
+    def _getcommission(self, size, price, pseudoexec):
+        return max(self.p.min_fee, abs(size) * price * self.p.commission)
 
-# ==========================================
-# 2. 策略定义：双均线金叉死叉
-# ==========================================
-class SmaCrossStrategy(bt.Strategy):
-    params = (('fast', 5), ('slow', 20),)
+# ================= 2. 核心策略类 =================
+class QMT_Selective_StopLoss_Strategy(bt.Strategy):
+    params = (
+        ('rebalance_freq', 5),
+        ('buyin_count', 6),
+        ('slippage', 0.0005),
+        ('stop_loss_pct', 0.10), # 10% 止损
+    )
 
     def __init__(self):
-        # 定义 5日和 20日均线
-        self.sma_fast = bt.indicators.SMA(self.data.close, period=self.p.fast)
-        self.sma_slow = bt.indicators.SMA(self.data.close, period=self.p.slow)
-        # 定义交叉信号：1为金叉，-1为死叉
-        self.crossover = bt.indicators.CrossOver(self.sma_fast, self.sma_slow)
+        self.count = 0
+        self.stock_pool = STOCK_POOL
+        self.stocks = {d._name: d for d in self.datas if d._name != '000300.SH'}
 
     def next(self):
-        if not self.position:  # 手中无持仓
-            if self.crossover > 0:  # 金叉买入
-                self.log(f'【买入信号】价格: {self.data.close[0]:.2f}')
-                self.buy(size=100) # 买入100股
-        elif self.crossover < 0:  # 死叉卖出
-            self.log(f'【卖出信号】价格: {self.data.close[0]:.2f}')
-            self.close() # 平仓
+        dt_str = self.data.datetime.date(0).strftime('%Y%m%d')
+        # 今日禁止买入的个股名单 (只针对刚止损卖出的)
+        banned_today = []
 
-    def log(self, txt):
-        dt = self.datas[0].datetime.date(0)
-        print(f'{dt} {txt}')
+        # --- 1. 每日个股止损检查 ---
+        for d in self.datas:
+            code = d._name
+            if code == '000300.SH': continue
+            pos = self.getposition(d)
+            if pos.size > 0:
+                cost_price = pos.price
+                curr_price = d.close[0]
+                
+                # 检查是否亏损超过 10%
+                if (curr_price / cost_price - 1) <= -self.p.stop_loss_pct:
+                    self.close(data=d)
+                    banned_today.append(code) # 加入今日黑名单
+                    print(f"[{dt_str}] !! 止损卖出: {code}, 跌幅:{(curr_price/cost_price-1)*100:.2f}%")
 
-# ==========================================
-# 3. 数据桥接：QMT -> Backtrader
-# ==========================================
-def get_qmt_data(stock_code, start_date, end_date):
-    print(f"正在从 QMT 获取 {stock_code} 数据...")
-    
-    # 下载历史数据 (确保 QMT 客户端已登录行情)
-    # xtdata.download_history_data(stock_code, period='1d', start_time=start_date, end_time=end_date)
-    
-    # 获取数据并转为 DataFrame
-    raw_data = xtdata.get_market_data_ex([], [stock_code], period='1d', start_time=start_date, end_time=end_date)
-    df = raw_data[stock_code]
-    
-    if df.empty:
-        raise ValueError("未能获取到数据，请检查 QMT 是否登录且代码输入正确。")
+        # --- 2. 调仓逻辑 (每5天触发) ---
+        if self.count % self.p.rebalance_freq == 0:
+            # A. 选股
+            sentiment = get_market_sentiment('000300.SH', dt_str)
+            try:
+                selected_df = select(stock_pool=self.stock_pool, at_date=dt_str, sector=False, 
+                                     top_n=10, download=False, sentiment=sentiment, output=False)
+                top_targets = selected_df.index.tolist()[:self.p.buyin_count]
+            except:
+                top_targets = []
 
-    # 格式标准化
-    df.index = pd.to_datetime(df.index)
-    df = df[['open', 'high', 'low', 'close', 'volume']]
-    df['openinterest'] = 0
+            # B. 卖出逻辑 (排名淘汰)
+            for d in self.datas:
+                code = d._name
+                if code == '000300.SH': continue
+                pos = self.getposition(d)
+                # 如果没在上面的止损环节卖掉，但不在新名单里了，则卖出
+                if pos.size > 0 and code not in top_targets:
+                    self.close(data=d)
+                    print(f"[{dt_str}] 排名淘汰: {code}")
 
-    print(df)
-    
-    return bt.feeds.PandasData(dataframe=df)
+            # C. 买入逻辑 (补位)
+            total_asset = self.broker.getvalue()
+            target_per_stock = total_asset / self.p.buyin_count
+            
+            for code in top_targets:
+                if code not in self.stocks: continue
+                # 如果该股今天刚止损卖出，即使它在 Top 名单里也跳过
+                if code in banned_today:
+                    print(f"[{dt_str}] 跳过买入: {code} (今日已止损)")
+                    continue
+                
+                d = self.stocks[code]
+                if self.getposition(d).size == 0:
+                    # 检查一字涨停/停牌
+                    if d.close[0] <= 0 or d.high[0] == d.low[0]:
+                        continue
+                        
+                    exec_price = d.close[0] * (1 + self.p.slippage)
+                    size = int(target_per_stock / exec_price / 100) * 100
+                    
+                    if size > 0 and self.broker.getcash() > (size * exec_price * 1.01):
+                        self.buy(data=d, size=size)
+                        print(f"[{dt_str}] 买入补位: {code}, 数量: {size}")
 
-# ==========================================
-# 4. 主程序运行
-# ==========================================
-if __name__ == '__main__':
-    # 初始化大脑
+        self.count += 1
+
+# ================= 3. 运行配置 =================
+def run_regression():
     cerebro = bt.Cerebro()
-
-    # 获取平安银行数据 (000001.SZ)
-    try:
-        data = get_qmt_data('000001.SZ', '20240101', '20241231')
-        cerebro.adddata(data)
-    except Exception as e:
-        print(f"数据获取失败: {e}")
-        sys.exit()
-
-    # 注入策略
-    cerebro.addstrategy(SmaCrossStrategy)
-
-    # 设置初始资金 (对应账号 47601131)
-    cerebro.broker.setcash(100000.0)
-    # 设置万三手续费
-    cerebro.broker.setcommission(commission=0.0003)
-
-    print(f'回测启动资产: {cerebro.broker.getvalue():.2f}')
+    # 启用收盘撮合模式
+    cerebro.broker.set_coc(True) 
+    
+    # 初始化
+    cerebro.broker.setcash(600000.0)
+    cerebro.broker.addcommissioninfo(QMT_Stock_Comm())
+    
+    # 模拟数据载入 (此处建议循环全量池)
+    for code in STOCK_POOL:
+        df = xtdata.get_market_data_ex([], [code], period='1d', start_time='20250101', end_time='20251231',dividend_type='front')[code]
+        if not df.empty:
+            df.index = pd.to_datetime(df.index)
+            data = bt.feeds.PandasData(dataframe=df, name=code)
+            cerebro.adddata(data)
+   
+    cerebro.addstrategy(QMT_Selective_StopLoss_Strategy)
+    #cerebro.addobserver(bt.observers.Value)
+    print('回测开始...')
     cerebro.run()
-    print(f'回测最终资产: {cerebro.broker.getvalue():.2f}')
-
-    # 【关键步骤】绘图
-    # backtrader-next 支持更现代的绘图方式
-    print("正在生成图表...")
-    time_tag = datetime.now().strftime("%Y%m%d_%H%M")
-    report_name = f'results/strat_{time_tag}.html'
-    cerebro.plot(style='candlestick', volume=True, filename=report_name)
+    print('最终净值: %.2f' % cerebro.broker.getvalue())
+    cerebro.plot(style='candle', numfigs=1, volume=False)
+if __name__ == '__main__':
+    run_regression()
