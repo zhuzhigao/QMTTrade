@@ -125,6 +125,7 @@ def run_regression():
     result = cerebro.run()
     strat = result[0]
     print('最终净值: %.2f' % cerebro.broker.getvalue())
-    cerebro.plot(style='candle', numfigs=1, volume=False)
+    cerebro.show_report()
+    #cerebro.plot(style='candle', numfigs=1, volume=False)
 if __name__ == '__main__':
     run_regression()
