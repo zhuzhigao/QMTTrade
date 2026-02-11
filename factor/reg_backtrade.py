@@ -1,15 +1,17 @@
 # -*- coding: utf-8 -*-
 import backtrader_next as bt
+import matplotlib.pyplot as plt
 import pandas as pd
 from datetime import datetime
 from xtquant import xtdata
 from factor_selection import select
 from factor_lib import get_market_sentiment
 
-STOCK_POOL = ['301308.SZ', '603986.SH', '002920.SZ', '002555.SZ', '601919.SH', '601857.SH', '601788.SH', '600887.SH', 
-                          '601898.SH', '600886.SH', '600900.SH', '688981.SH', '688126.SH', '002371.SZ', '002202.SZ', '601633.SH', 
-                          '300750.SZ', '002594.SZ','601360.SH', '601601.SH', '601600.SH', '600941.SH', '601988.SH', '600050.SH', 
-                          '300274.SZ']
+STOCK_POOL = ['301308.SZ', '603986.SH', '002920.SZ', '002555.SZ', '601919.SH', '601857.SH', '601788.SH', '600887.SH']
+# , 
+#                           '601898.SH', '600886.SH', '600900.SH', '688981.SH', '688126.SH', '002371.SZ', '002202.SZ', '601633.SH', 
+#                           '300750.SZ', '002594.SZ','601360.SH', '601601.SH', '601600.SH', '600941.SH', '601988.SH', '600050.SH', 
+#                           '300274.SZ']
 # ================= 1. 手续费模型 (最低5元) =================
 class QMT_Stock_Comm(bt.CommInfoBase):
     params = (
@@ -110,22 +112,95 @@ def run_regression():
     # 初始化
     cerebro.broker.setcash(600000.0)
     cerebro.broker.addcommissioninfo(QMT_Stock_Comm())
+
+    bench_code = '000300.SH'
+    df_bench = xtdata.get_market_data_ex([], [bench_code], period='1d', 
+                                         start_time='20240101', end_time='20251231')[bench_code]
+    df_bench.index = pd.to_datetime(df_bench.index)
+    
+    # 将基准数据喂给 cerebro
+    bench_data = bt.feeds.PandasData(dataframe=df_bench)
+    cerebro.adddata(bench_data, name='HS300')
+    
+    # 【关键】通过 plotinfo 隐藏沪深300自己的 K 线图，只留数据给观察器用
+    bench_data.plotinfo.plot = True
     
     # 模拟数据载入 (此处建议循环全量池)
     for code in STOCK_POOL:
-        df = xtdata.get_market_data_ex([], [code], period='1d', start_time='20250101', end_time='20251231',dividend_type='front')[code]
+        df = xtdata.get_market_data_ex([], [code], period='1d', start_time='20240101', end_time='20251231',dividend_type='front')[code]
         if not df.empty:
             df.index = pd.to_datetime(df.index)
             data = bt.feeds.PandasData(dataframe=df, name=code)
             cerebro.adddata(data)
-   
+
     cerebro.addstrategy(QMT_Selective_StopLoss_Strategy)
-    #cerebro.addobserver(bt.observers.Value)
-    print('回测开始...')
-    result = cerebro.run()
-    strat = result[0]
-    print('最终净值: %.2f' % cerebro.broker.getvalue())
+
+    cerebro.addanalyzer(bt.analyzers.TimeDrawDown, _name='drawdown')
+    cerebro.addanalyzer(bt.analyzers.Returns, _name='returns')
+    cerebro.addanalyzer(bt.analyzers.SharpeRatio, _name='sharpe', riskfreerate=0.03) # 假设无风险利率3%
+ 
+    
+    #cerebro.addobserver(bt.observers.Benchmark, data=bench_data)
+
+    cerebro.addanalyzer(bt.analyzers.TimeReturn, _name='p_returns') # 策略收益
+    cerebro.addanalyzer(bt.analyzers.DrawDown, _name='p_drawdown')  # 策略回撤
+
+    print('回测进行中...')
+    results = cerebro.run()
+    strat = results[0]
+
+    print('------------------------------------')
+    print(f'最终净值: {cerebro.broker.getvalue():.2f}')
+    print(f"总收益率: {strat.analyzers.returns.get_analysis()['rtot']*100:.2f}%")
+    print(f"最大回撤: {strat.analyzers.drawdown.get_analysis()['maxdrawdown']:.2f}%")
+    # 注意：夏普比率有时会因为交易太少返回 None，需做判断
+    # sharpe = strat.analyzers.sharpe.get_analysis()['sharperatio']
+    # print(f"夏普比率: {sharpe if sharpe else '数据不足':.2f}")
+    print('------------------------------------')
     cerebro.show_report()
-    #cerebro.plot(style='candle', numfigs=1, volume=False)
+    cerebro.plot(style='candle', numfigs=1, volume=False)
+
+    # ==========================================
+    # 5. 提取数据并计算对比
+    # ==========================================
+    # A. 提取策略数据
+    strategy_ret = pd.Series(strat.analyzers.p_returns.get_analysis()).sort_index()
+    strategy_cum = (1 + strategy_ret).cumprod() # 累计净值
+    
+    # 计算策略动态回撤序列
+    # 虽然分析器给出了最大回撤，但画图需要每日回撤序列
+    strategy_drawdown = (strategy_cum / strategy_cum.cummax() - 1) * 100
+
+    # B. 提取基准数据 (HS300)
+    bench_close = df_bench['close'].reindex(strategy_cum.index).ffill()
+    bench_cum = bench_close / bench_close.iloc[0] # 归一化累计净值
+    bench_drawdown = (bench_cum / bench_cum.cummax() - 1) * 100
+
+    # ==========================================
+    # 6. 绘制专业对比图
+    # ==========================================
+    fig, (ax1, ax2) = plt.subplots(2, 1, figsize=(12, 10), sharex=True, gridspec_kw={'height_ratios': [2, 1]})
+    plt.subplots_adjust(hspace=0.05)
+
+    # 上图：累计收益率对比
+    ax1.plot(strategy_cum, label='My Strategy', color='#d62728', linewidth=2)
+    ax1.plot(bench_cum, label='HS300 Index', color='#7f7f7f', linestyle='--', alpha=0.8)
+    ax1.set_title('Strategy vs HS300 Performance', fontsize=14, fontweight='bold')
+    ax1.set_ylabel('Normalized Value (Starting at 1.0)')
+    ax1.legend(loc='upper left')
+    ax1.grid(True, alpha=0.3)
+
+    # 下图：回撤对比
+    ax2.fill_between(strategy_drawdown.index, strategy_drawdown, 0, facecolor='#d62728', alpha=0.3, label='Strategy DD')
+    ax2.plot(bench_drawdown, color='#7f7f7f', linewidth=1, label='HS300 DD')
+    ax2.set_ylabel('Drawdown (%)')
+    ax2.set_xlabel('Date')
+    ax2.legend(loc='lower left')
+    ax2.grid(True, alpha=0.3)
+
+    print(f"回测完成！最终净值: {cerebro.broker.getvalue():.2f}")
+    plt.show()
+
+
 if __name__ == '__main__':
     run_regression()
