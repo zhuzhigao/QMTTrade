@@ -122,7 +122,8 @@ def run_regression():
     cerebro.addstrategy(QMT_Selective_StopLoss_Strategy)
     #cerebro.addobserver(bt.observers.Value)
     print('回测开始...')
-    cerebro.run()
+    result = cerebro.run()
+    strat = result[0]
     print('最终净值: %.2f' % cerebro.broker.getvalue())
     cerebro.plot(style='candle', numfigs=1, volume=False)
 if __name__ == '__main__':
