@@ -52,6 +52,8 @@ class Config:
     # --- 交易设置 ---
     check_time = "09:35:00"     # 每日调仓检查时间
 
+
+
 # ======================== 2. 核心算法逻辑 ========================
 
 def get_rsrs_signal():
@@ -82,7 +84,7 @@ def get_rsrs_signal():
 def filter_audit_opinion(pool):
     """审计意见防火墙 (兼容股票)"""
     # 提取非ETF标的 (A股代码通常不以51, 15, 58开头)
-    stocks = [s for s in pool if not (s.startswith('51') or s.startswith('15') or s.startswith('58'))]
+    stocks = [s for s in pool if not (s.startswith('51') or s.startswith('15') or s.startswith('58') or s.startswith('56'))]
     etfs = [s for s in pool if s not in stocks]
     
     if not stocks: return etfs
@@ -232,14 +234,14 @@ class RobotTrader:
         print(">>> 交易机器人已启动，等待定时任务...")
         while True:
             now_str = datetime.datetime.now().strftime("%H:%M:%S")
-            if True: #now_str == Config.check_time:
+            if DEBUG or now_str == Config.check_time:
                 try:
                     self.execute_logic()
                 except Exception as e:
                     print(f"运行时发生错误: {e}")
                 time.sleep(2) # 避开同一秒多次触发
             time.sleep(1)
-
+DEBUG = True
 if __name__ == "__main__":
     bot = RobotTrader()
     if bot.connect():
