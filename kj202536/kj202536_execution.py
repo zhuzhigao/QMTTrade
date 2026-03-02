@@ -11,7 +11,7 @@ import datetime
 import numpy as np
 import pandas as pd
 from scipy import stats
-from xtquant import xtdata
+from xtquant import xtdata,xtconstant
 from xtquant.xttrader import XtQuantTrader
 
 class XtStockAccount:
@@ -32,25 +32,55 @@ class Config:
     
     # --- 资产池配置 (分组逻辑) ---
     etf_groups = {
-        'Commodity': ['159985.SZ', '159981.SZ', '159980.SZ', '518880.SH'], # 豆粕, 能化, 有色, 黄金
-        'Dividend':  ['510880.SH', '512890.SH'],                        # 红利, 红利低波
-        'Core':      ['510150.SH', '159967.SZ', '588000.SH'],            # 上证50, 创蓝筹, 科创50
-        'Global':    ['513100.SH', '513500.SH', '513030.SH'],             # 纳指, 标普, 德国30
-        'Stock':     ['300274.SZ', '600050.SH']
+        'Commodity': {
+            '159985.SZ': '豆粕ETF', 
+            '159981.SZ': '能化ETF', 
+            '159980.SZ': '有色ETF', 
+            '518880.SH': '黄金ETF'
+        },
+        'Dividend':  {
+            '510880.SH': '红利ETF', 
+            '512890.SH': '红利低波ETF'
+        },
+        'Core':      {
+            '510150.SH': '上证50', 
+            '159967.SZ': '创蓝筹', 
+            '588000.SH': '科创50'
+        },
+        'Global':    {
+            '513100.SH': '纳指ETF', 
+            '513500.SH': '标普500', 
+            '513030.SH': '德国30'
+        },
+        'Stock':     {
+            '300274.SZ': '阳光电源', 
+            '600050.SH': '中国联通'
+        }
     }
-    bond_etf = '511010.SH'      # 避险：活跃国债ETF
+    bond_etf = '511010.SH'
+    bond_name = '国债ETF' # 避险资产的名字也存一下
+
+    # 自动生成一个扁平化的代码列表（用于获取数据）
+    all_symbols = [code for group in etf_groups.values() for code in group.keys()] + [bond_etf]
+    
+    # 自动生成一个扁平化的名称映射表（用于下单备注查询）
+    symbol_to_name = {code: name for group_dict in etf_groups.values() for code, name in group_dict.items()}
+    symbol_to_name[bond_etf] = bond_name
+
     index_code = '000300.SH'    # 择时基准
     
     # --- 算法参数 ---
     rsrs_n = 18                 # RSRS回归窗口
     rsrs_m = 600                # 标准化基准天数
-    buy_threshold = 0.7         # 看多阈值
-    sell_threshold = -0.7       # 看空阈值
+    buy_threshold = 0.5         # 看多阈值
+    sell_threshold = -0.5       # 看空阈值
     rank_days = 20              # 动量回看期
     target_num = 3              # 同时持有ETF类别数
     
     # --- 交易设置 ---
     check_time = "09:35:00"     # 每日调仓检查时间
+
+    policy_asset = 60000
 
 
 
@@ -207,26 +237,72 @@ class RobotTrader:
     def sync_orders(self, target_list):
         # 获取当前持仓
         positions = self.trader.query_stock_positions(self.acc)
-        current_holdings = {p.stock_code: p.volume for p in positions if p.volume > 0}
+        
+        # 👇👇👇 修改：不仅要求 volume > 0，还要求代码必须在白名单里 👇👇👇
+        current_holdings = {
+            p.stock_code: p.volume 
+            for p in positions 
+            if p.volume > 0 and p.stock_code in Config.all_symbols
+        }
         
         # 获取资产总额
         asset = self.trader.query_stock_asset(self.acc)
-        total_asset = asset.total_asset
+        total_asset = min(asset.total_asset, Config.policy_asset)
+        print(f"账户总资产: {asset.total_asset:.2f} | 本策略实际分配额度: {total_asset:.2f}")
         
-        # A. 卖出不再目标的标的
+        today_str = datetime.datetime.now().strftime("%Y%m%d")
+ # ================= A. 卖出不再目标的标的 =================
         for code in current_holdings.keys():
             if code not in target_list:
-                print(f"【卖出】{code} | 逻辑: 不在目标列表")
-                #self.trader.order_stock(self.acc, code, 24, 0, 11, -1, "36_Strategy_Sell")
+                # 获取实际该卖的股数
+                sell_vol = current_holdings[code]
+                name = Config.symbol_to_name.get(code, code)
+                remark = f"Sell_{name}_{today_str}"                
+                try:
+                    # 瞬间拉取最新盘口价
+                    tick = xtdata.get_full_tick([code])
+                    if code in tick and tick[code]['lastPrice'] > 0:
+                        current_price = tick[code]['lastPrice']
+                        print(f"【准备卖出】{code} | 单价: {current_price} | 数量: {sell_vol}股 | 逻辑: 调出目标池")
+                        
+                        # 发送真实的卖出委托 (24代表卖出，或者用 xtconstant.STOCK_SELL)
+                        self.trader.order_stock(self.acc, code, xtconstant.STOCK_SELL, sell_vol, xtconstant.FIX_PRICE, current_price, "36_Strategy_Sell", remark)
+                    else:
+                        print(f"  -> 获取 {code} 最新价失败，跳过卖出")
+                except Exception as e:
+                    print(f"  -> {code} 卖出订单报错: {e}")
 
         # B. 买入目标 (按总资产比例)
         weight = 1.0 / len(target_list)
         for code in target_list:
             target_value = total_asset * weight
-            print(f"【调整】{code} | 目标价值: {target_value:.2f}")
-            # order_value 会根据目标价值自动计算所需买入/卖出量
-            #self.trader.order_value(self.acc, code, 23, target_value, 11, -1, "36_Strategy_Rebalance")
-
+            print(f"【调整计划】{code} | 目标价值: {target_value:.2f}")
+            
+            try:
+                # 1. 获取最新盘口价格 (为了计算能买多少股)
+                tick = xtdata.get_full_tick([code])
+                if code in tick and tick[code]['lastPrice'] > 0:
+                    current_price = tick[code]['lastPrice']
+                else:
+                    print(f"  -> 获取 {code} 最新价失败，跳过下单")
+                    continue
+                
+                # 2. 计算需要买入的股数 (金额 / 单价 / 100向下取整 * 100)
+                # A股/ETF 买入必须是 1 手 (100股) 的整数倍
+                target_volume = int(target_value / current_price / 100) * 100
+                name = Config.symbol_to_name.get(code, code)
+                remark = f"Buy_{name}_{today_str}"
+                # 3. 发送真实的买入委托
+                if target_volume > 0:
+                    print(f"【实际买入】{code} | 单价: {current_price} | 数量: {target_volume}股")
+                    # 参数说明: 23=买入, target_volume=买入股数, 11=本方最优(市价/最新价单)
+                    self.trader.order_stock(self.acc, code, xtconstant.STOCK_BUY, target_volume, xtconstant.FIX_PRICE, current_price, "36_Strategy_Buy", remark)
+                else:
+                    print(f"  -> {code} 计算出的买入股数不足 1 手，无法下单")
+                    
+            except Exception as e:
+                print(f"  -> {code} 订单生成时报错: {e}")
+                
     def loop(self):
         print(">>> 交易机器人已启动，等待定时任务...")
         while True:
@@ -238,7 +314,8 @@ class RobotTrader:
                     print(f"运行时发生错误: {e}")
                 time.sleep(2) # 避开同一秒多次触发
             time.sleep(1)
-DEBUG = True
+    
+DEBUG = False              
 if __name__ == "__main__":
     bot = RobotTrader()
     if bot.connect():

@@ -54,6 +54,8 @@ for sym in ALL_SYMBOLS:
     df.index = pd.to_datetime(df.index)
     close_df[sym] = df['close']
 
+close_df = close_df.ffill()
+
 # ================= 3. 预计算 RSRS 择时指标 =================
 print(">>> 正在计算 RSRS 标准分...")
 rsrs_slopes = pd.Series(index=idx_data.index, dtype=float)
