@@ -32,7 +32,7 @@ RSRS_N = 18
 RSRS_M = 600
 MOM_DAYS = 20
 TRADE_CYCLE = 5 # 每5天调仓一次
-SLOP_THRESHOLD = 0.5
+SLOP_THRESHOLD = 0.7
 
 # ================= 2. 数据准备与预处理 =================
 print(">>> 正在从 QMT 下载和读取本地历史数据...")
@@ -53,8 +53,6 @@ for sym in ALL_SYMBOLS:
     df = xtdata.get_market_data_ex(['close'], [sym], period='1d', start_time=fetch_start, end_time=END_DATE, dividend_type='front')[sym]
     df.index = pd.to_datetime(df.index)
     close_df[sym] = df['close']
-
-close_df = close_df.ffill()
 
 # ================= 3. 预计算 RSRS 择时指标 =================
 print(">>> 正在计算 RSRS 标准分...")
@@ -169,15 +167,15 @@ nav = (1 + returns_df).cumprod()
 
 # 绘制曲线
 
-plt.figure(figsize=(12, 6))
-plt.plot(nav['Strategy'], label='Strategy 36', color='red', linewidth=2)
-plt.plot(nav['Benchmark'], label='HS300 Benchmark', color='blue', alpha=0.6)
-plt.title('Strategy 36 ETF Rotation Backtest')
-plt.ylabel('Net Asset Value (NAV)')
-plt.legend()
-plt.grid(True)
-plt.savefig('strategy36_result.png', dpi=300, bbox_inches='tight')
-plt.show()
+# plt.figure(figsize=(12, 6))
+# plt.plot(nav['Strategy'], label='Strategy 36', color='red', linewidth=2)
+# plt.plot(nav['Benchmark'], label='HS300 Benchmark', color='blue', alpha=0.6)
+# plt.title('Strategy 36 ETF Rotation Backtest')
+# plt.ylabel('Net Asset Value (NAV)')
+# plt.legend()
+# plt.grid(True)
+# plt.savefig('strategy36_result.png', dpi=300, bbox_inches='tight')
+# plt.show()
 
 # 打印绩效
 total_return = nav['Strategy'].iloc[-1] - 1
