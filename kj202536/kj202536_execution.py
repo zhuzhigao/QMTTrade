@@ -55,7 +55,6 @@ class Config:
 
 
 # ======================== 2. 核心算法逻辑 ========================
-
 def get_rsrs_signal():
     """计算大盘RSRS择时信号"""
     print(f"正在计算 {Config.index_code} 的 RSRS 信号...")
@@ -90,8 +89,6 @@ def filter_audit_opinion(pool):
     if not stocks: return etfs
     
     # 查询最近一年审计意见
-    report_date = f"{datetime.datetime.now().year - 1}1231"
-    end_date = (datetime.datetime.now()).strftime("%Y%m%d")
     try:
         # xtdata 接口获取财务数据
         # 字段映射通常为 STK_AUDIT_OPINION.audit_opinion_type
