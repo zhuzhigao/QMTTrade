@@ -8,11 +8,14 @@
 
 import time
 import datetime
+from datetime import timezone, timedelta
 import numpy as np
 import pandas as pd
 from scipy import stats
 from xtquant import xtdata,xtconstant
 from xtquant.xttrader import XtQuantTrader
+
+BEIJING_TZ = timezone(timedelta(hours=8))
 
 class XtStockAccount:
     """
@@ -31,30 +34,56 @@ class Config:
     session_id = int(time.time())
     
     # --- 资产池配置 (分组逻辑) ---
+    # etf_groups = {
+    #     'Commodity': {
+    #         '159985.SZ': '豆粕ETF', 
+    #         '159981.SZ': '能化ETF', 
+    #         '159980.SZ': '有色ETF', 
+    #         '518880.SH': '黄金ETF'
+    #     },
+    #     'Dividend':  {
+    #         '510880.SH': '红利ETF', 
+    #         '512890.SH': '红利低波ETF'
+    #     },
+    #     'Core':      {
+    #         '510150.SH': '上证50', 
+    #         '159967.SZ': '创蓝筹', 
+    #         '588000.SH': '科创50'
+    #     },
+    #     'Global':    {
+    #         '513100.SH': '纳指ETF', 
+    #         '513500.SH': '标普500', 
+    #         '513030.SH': '德国30'
+    #     }
+    # }
+
     etf_groups = {
         'Commodity': {
-            '159985.SZ': '豆粕ETF', 
-            '159981.SZ': '能化ETF', 
+            '518880.SH': '黄金ETF', 
             '159980.SZ': '有色ETF', 
-            '518880.SH': '黄金ETF'
+            '159981.SZ': '能化ETF', 
+            '159985.SZ': '豆粕ETF'
         },
-        'Dividend':  {
-            '510880.SH': '红利ETF', 
-            '512890.SH': '红利低波ETF'
+        'Dividend_Value':  { # 红利与价值
+            '512890.SH': '红利低波ETF',
+            '561560.SH': '电力ETF',
+            '511260.SH': '十年国债ETF' # 也可以把长债放入此处作为防御轮动
         },
-        'Core':      {
+        'Core_Growth': { # 境内核心宽基
             '510150.SH': '上证50', 
-            '159967.SZ': '创蓝筹', 
-            '588000.SH': '科创50'
+            '588000.SH': '科创50', 
+            '159845.SZ': '中证1000', # 捕捉小盘行情
+            '159967.SZ': '创蓝筹'
         },
-        'Global':    {
+        'Global_Market': { # 全球配置
             '513100.SH': '纳指ETF', 
-            '513500.SH': '标普500', 
-            '513030.SH': '德国30'
+            '513520.SH': '日经225',
+            '513180.SH': '恒生科技'  # 新增：港股科技
         },
-        'Stock':     {
-            '300274.SZ': '阳光电源', 
-            '600050.SH': '中国联通'
+        'Sector_Alpha': { # 高贝塔行业主题 (新增组)
+            '512480.SH': '半导体ETF',
+            '159892.SZ': '恒生医疗', 
+            '512660.SH': '军工ETF'
         }
     }
     bond_etf = '511010.SH'
@@ -89,9 +118,9 @@ def get_rsrs_signal():
     """计算大盘RSRS择时信号"""
     print(f"正在计算 {Config.index_code} 的 RSRS 信号...")
     # 获取历史数据
-    start_date = (datetime.datetime.now() - datetime.timedelta(days=Config.rsrs_m + Config.rsrs_n)).strftime("%Y%m%d")
-
+    start_date = (datetime.datetime.now(BEIJING_TZ) - datetime.timedelta(days=Config.rsrs_m + Config.rsrs_n)).strftime("%Y%m%d")
     xtdata.download_history_data(Config.index_code, period='1d', start_time=start_date, end_time='')
+
     data = xtdata.get_market_data_ex(['high', 'low'], [Config.index_code], period='1d', count=Config.rsrs_m + Config.rsrs_n, dividend_type='front')[Config.index_code]
     
     highs = data['high'].values
@@ -161,7 +190,10 @@ def filter_audit_opinion(pool):
 
 def get_momentum_score(code):
     """计算动量平稳度评分: Return * R2"""
-    xtdata.download_history_data(code, period='1d', count=Config.rank_days)
+        # 获取历史数据
+    start_date = (datetime.datetime.now(BEIJING_TZ) - datetime.timedelta(days=Config.rsrs_m + Config.rsrs_n)).strftime("%Y%m%d")
+    xtdata.download_history_data(code, period='1d', start_time=start_date, end_time='')
+
     data = xtdata.get_market_data_ex(['close'], [code], period='1d', count=Config.rank_days)[code]
     prices = data['close'].values
     if len(prices) < Config.rank_days: return -999
@@ -169,7 +201,8 @@ def get_momentum_score(code):
     y = np.log(prices)
     x = np.arange(len(y))
     slope, _, r_val, _, _ = stats.linregress(x, y)
-    return (np.exp(slope * 250) - 1) * (r_val ** 2)
+    score =  (np.exp(slope * 250) - 1) * (r_val ** 2)
+    return score
 
 # ======================== 3. 交易执行引擎 ========================
 
@@ -190,8 +223,8 @@ class RobotTrader:
             return False
 
     def execute_logic(self):
-        print(f"\n--- 触发例行检查: {datetime.datetime.now()} ---")
-        
+        bj_now = datetime.datetime.now(BEIJING_TZ)
+        print(f"\n--- 触发例行检查 (北京时间): {bj_now.strftime('%Y-%m-%d %H:%M:%S')} ---")
         # 1. 计算择时
         z = get_rsrs_signal()
         print(f"当前 RSRS Z-Score: {z:.2f}")
@@ -204,10 +237,19 @@ class RobotTrader:
         if z > Config.buy_threshold:
             # 进攻模式
             scores = []
+            
+            print("\n>>> 资产池动量评分明细表:")
+            print(f"{'代码':<10} | {'名称':<12} | {'动量得分':<10}")
+            
+            print("-" * 40)
             for code in safe_pool:
                 s = get_momentum_score(code)
+                name = Config.symbol_to_name.get(code, "未知")
+                print(f"{code:<10} | {name:<12} | {s:10.4f}")
+
                 if s > 0: scores.append({'code': code, 'score': s})
-            
+            print("-" * 40)
+
             if scores:
                 df = pd.DataFrame(scores).sort_values('score', ascending=False)
                 used_grp = set()
@@ -250,7 +292,7 @@ class RobotTrader:
         total_asset = min(asset.total_asset, Config.policy_asset)
         print(f"账户总资产: {asset.total_asset:.2f} | 本策略实际分配额度: {total_asset:.2f}")
         
-        today_str = datetime.datetime.now().strftime("%Y%m%d")
+        today_str = datetime.datetime.now(BEIJING_TZ).strftime("%Y%m%d")
  # ================= A. 卖出不再目标的标的 =================
         for code in current_holdings.keys():
             if code not in target_list:
@@ -304,10 +346,10 @@ class RobotTrader:
                 print(f"  -> {code} 订单生成时报错: {e}")
                 
     def loop(self):
-        print(">>> 交易机器人已启动，等待定时任务...")
+        print(f">>> 交易机器人已启动 (当前北京时间: {datetime.datetime.now(BEIJING_TZ).strftime('%H:%M:%S')})")
         while True:
-            now_str = datetime.datetime.now().strftime("%H:%M:%S")
-            if DEBUG or now_str == Config.check_time:
+            now_bj = datetime.datetime.now(BEIJING_TZ)
+            if DEBUG or now_bj == Config.check_time:
                 try:
                     self.execute_logic()
                 except Exception as e:
@@ -315,7 +357,7 @@ class RobotTrader:
                 time.sleep(2) # 避开同一秒多次触发
             time.sleep(1)
     
-DEBUG = False              
+DEBUG = True              
 if __name__ == "__main__":
     bot = RobotTrader()
     if bot.connect():
