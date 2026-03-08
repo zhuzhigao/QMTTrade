@@ -32,6 +32,8 @@ class GlobalVar:
     target_list = []                 # 今日目标持仓
     stock_num = Config.base_stock_num
     market_crash = False             # 大盘是否暴跌
+    # 【新增：止损冷却小黑屋】记录止损股票和日期，格式: {'600000.SH': datetime.date(2026, 3, 7)}
+    blacklist = {}                   
 
 # ================= 2. 交易回调与状态管理 =================
 class MyCallback(XtQuantTraderCallback):
@@ -104,7 +106,6 @@ def get_fundamental_pool():
 
     # 2. QMT 原生实时排雷与量价过滤
     final_target_pool = []
-    xtdata.download_instrument_detail()
     
     # 【修正处 1：个股初筛行情下载】往前推10个自然日，确保覆盖5个交易日
     start_date_stock = (datetime.datetime.now(BEIJING_TZ) - datetime.timedelta(days=10)).strftime("%Y%m%d")
@@ -114,6 +115,21 @@ def get_fundamental_pool():
     
     for _, row in df_pool.iterrows():
         stock = row['qmt_code']
+        
+        # =======================================================
+        # 【新增：检查是否在止损冷却小黑屋中】
+        # =======================================================
+        if stock in GlobalVar.blacklist:
+            # 严格使用 BEIJING_TZ 保持时区一致
+            days_banned = (datetime.datetime.now(BEIJING_TZ).date() - GlobalVar.blacklist[stock]).days
+            if days_banned < 30:  # 30天内不允许再买
+                print(f"    -> [风控拦截] 跳过 {stock}，触发止损后目前在 30 天冷却期内。")
+                continue
+            else:
+                # 满30天了，刑满释放
+                print(f"    -> [风控释放] {stock} 止损冷却期已满 30 天，移除黑名单。")
+                del GlobalVar.blacklist[stock]
+
         total_share = row['总股本']
         
         detail = xtdata.get_instrument_detail(stock)
@@ -178,8 +194,12 @@ def check_stop_loss(trader, account):
             order_target_volume(trader, account, pos.stock_code, 0, current_price, 'take_profit')
             
         elif current_price < cost * (1 - Config.stoploss_limit):
-            print(f"[{pos.stock_code}] 跌幅超9%触发止损")
+            print(f"[{pos.stock_code}] 跌幅超9%触发止损，关进 30 天小黑屋！")
             order_target_volume(trader, account, pos.stock_code, 0, current_price, 'stop_loss')
+            # =======================================================
+            # 【新增：记录拉黑日期】使用统一的 BEIJING_TZ
+            # =======================================================
+            GlobalVar.blacklist[pos.stock_code] = datetime.datetime.now(BEIJING_TZ).date()
 
 def adjust_positions(trader, account, target_list):
     """【目标调仓】对比当前持仓，执行卖出和买入，实现等权重调仓"""
@@ -196,7 +216,7 @@ def adjust_positions(trader, account, target_list):
     
     # 2. 买入新标的 (等权买入)
     asset = trader.query_stock_asset(account)
-    available_cash = asset.cash
+    available_cash = min(asset.cash, 60000) #最多60000
     buy_list = [s for s in target_list if s not in hold_list]
     
     if not buy_list or available_cash < 1000:
@@ -214,7 +234,7 @@ def adjust_positions(trader, account, target_list):
             volume = int(cash_per_stock / price / 100) * 100 # 向下取整到整百股
             if volume > 0:
                 print(f"--> [发送订单] 动作: 买入 | 代码: {stock} | 数量: {volume}股 | 挂单价: {price} | 业务: rebalance_buy")
-                trader.order_stock(account, stock, xtconstant.STOCK_BUY, volume, xtconstant.LATEST_PRICE, price, 'strategy', 'rebalance_buy')
+                # trader.order_stock(account, stock, xtconstant.STOCK_BUY, volume, xtconstant.LATEST_PRICE, price, 'strategy', 'rebalance_buy')
 
 def order_target_volume(trader, account, stock_code, target_vol, price, remark='adjust'):
     """基础辅助函数：下单直到满足目标股数"""
@@ -228,11 +248,11 @@ def order_target_volume(trader, account, stock_code, target_vol, price, remark='
     diff = target_vol - current_vol
     if diff > 0:
         print(f"--> [发送订单] 动作: 买入 | 代码: {stock_code} | 数量: {diff}股 | 挂单价: {price} | 业务: {remark}")
-        trader.order_stock(account, stock_code, xtconstant.STOCK_BUY, diff, xtconstant.LATEST_PRICE, price, 'strategy', remark) 
+        # trader.order_stock(account, stock_code, xtconstant.STOCK_BUY, diff, xtconstant.LATEST_PRICE, price, 'strategy', remark) 
     elif diff < 0:
         sell_vol = abs(diff)
         print(f"--> [发送订单] 动作: 卖出 | 代码: {stock_code} | 数量: {sell_vol}股 | 挂单价: {price} | 业务: {remark}")
-        trader.order_stock(account, stock_code, xtconstant.STOCK_SELL, sell_vol, xtconstant.LATEST_PRICE, price, 'strategy', remark)
+        #trader.order_stock(account, stock_code, xtconstant.STOCK_SELL, sell_vol, xtconstant.LATEST_PRICE, price, 'strategy', remark)
 
 # ================= 5. 定时任务主循环 =================
 
@@ -262,13 +282,13 @@ def run_strategy():
             time.sleep(60)
 
         # 09:05 盘前准备：测算大盘趋势并更新仓位数量
-        if time_str == "09:05" and not task_done['09:05']:
+        if DEBUG or (time_str == "09:05" and not task_done['09:05']):
             GlobalVar.stock_num = get_market_trend_stock_num()
             print(f"[{time_str}] 今日大盘趋势运算完成，计划持仓股数: {GlobalVar.stock_num}")
             task_done['09:05'] = True
 
         # 10:00 调仓时刻：风控检查 + 根据月份与基本面选股池调仓
-        if time_str == "10:00" and not task_done['10:00']:
+        if DEBUG or (time_str == "10:00" and not task_done['10:00']):
             check_stop_loss(trader, account)
             
             if now.month in Config.pass_months:
@@ -282,12 +302,14 @@ def run_strategy():
             task_done['10:00'] = True
 
         # 14:00 下午风控：再次检查系统暴跌或个股止损
-        if time_str == "14:00" and not task_done['14:00']:
+        if DEBUG or (time_str == "14:00" and not task_done['14:00']):
             check_stop_loss(trader, account)
             task_done['14:00'] = True
 
         # 防止高频死循环占用CPU
         time.sleep(1) 
 
+
+DEBUG = False
 if __name__ == '__main__':
     run_strategy()
