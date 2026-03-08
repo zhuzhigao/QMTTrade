@@ -1,0 +1,293 @@
+# -*- coding: utf-8 -*-
+import time
+import datetime
+from datetime import timezone, timedelta
+import sqlite3
+import pandas as pd
+from xtquant import xtdata
+from xtquant.xttrader import XtQuantTrader, XtQuantTraderCallback
+from xtquant.xttype import StockAccount
+import xtquant.xtconstant as xtconstant
+
+# ================= 1. 全局配置与参数 =================
+BEIJING_TZ = timezone(timedelta(hours=8))
+class Config:
+    account_id = '47601131'  # 您的资金账号
+    mini_qmt_path =  r'D:\光大证券金阳光QMT实盘\userdata_mini'  # 【必改】极简模式客户端安装路径
+    db_path = r'C:\Users\xiusan\OneDrive\Investment\Quant_data\fundamental_data.db' # 【必改】本地SQLite数据库路径
+    
+    # 策略核心参数
+    pass_months = [1, 4]             # 空仓的月份 (规避年报、一季报披露期爆雷)
+    etf = '511880.SH'                # 空仓月份持有的银华日利ETF
+    base_stock_num = 4               # 基础持仓股票数量
+    stoploss_limit = 0.09            # 个股止损线 9%
+    stoploss_market = 0.05           # 市场大跌止损线 5%
+    index_code = '000300.SH'         # 参考大盘指数改为沪深300
+    
+    # 选股过滤参数
+    min_market_cap = 10_0000_0000    # 最小市值：10亿 (原代码中的10个亿)
+    max_price = 50                   # 股票单价上限设置
+
+class GlobalVar:
+    target_list = []                 # 今日目标持仓
+    stock_num = Config.base_stock_num
+    market_crash = False             # 大盘是否暴跌
+
+# ================= 2. 交易回调与状态管理 =================
+class MyCallback(XtQuantTraderCallback):
+    def on_disconnected(self):
+        print("警告：交易服务器连接断开！")
+    
+    def on_stock_order(self, order):
+        print(f"订单更新: {order.stock_code}, 状态: {order.order_status_msg}, 成交均价: {order.traded_price}, 成交量: {order.traded_volume}")
+        
+    def on_stock_trade(self, trade):
+        print(f"成交回报: {trade.stock_code}, 数量: {trade.traded_volume}, 价格: {trade.traded_price}")
+
+# ================= 3. 核心选股与信号模块 =================
+def get_market_trend_stock_num():
+    """动态仓位控制：根据沪深300与10日均线的偏离度(乖离率)决定持仓数量"""
+    # 往前推 40 个自然日，绝对保证覆盖 20 个交易日
+    start_date = (datetime.datetime.now(BEIJING_TZ) - datetime.timedelta(days=40)).strftime("%Y%m%d")
+    xtdata.download_history_data2([Config.index_code], period='1d', start_time=start_date, end_time='')
+    df = xtdata.get_market_data_ex(['close'], [Config.index_code], period='1d', count=20, dividend_type='front')[Config.index_code]
+    
+    if df.empty or len(df) < 10:
+        return Config.base_stock_num
+        
+    df['ma10'] = df['close'].rolling(window=10).mean()
+    last_close = df['close'].iloc[-1]
+    last_ma = df['ma10'].iloc[-1]
+    
+    # 计算乖离率百分比 (Bias Ratio)
+    diff_pct = (last_close - last_ma) / last_ma
+    
+    if diff_pct >= 0.05:             return 3
+    elif 0.02 <= diff_pct < 0.05:    return 3
+    elif -0.02 <= diff_pct < 0.02:   return 4
+    elif -0.05 <= diff_pct < -0.02:  return 5
+    else:                            return 6    
+
+def get_fundamental_pool():
+    """从SQLite获取高分红/基本面达标股票，结合QMT进行市值、价格、ST排雷"""
+    print("开始从本地数据库及QMT进行基本面选股...")
+    
+    # 1. 连接本地数据库
+    conn = sqlite3.connect(Config.db_path)
+    query = """
+        SELECT d.qmt_code, d.[现金分红-股息率], f.净资产收益率, f.[净利润-净利润], f.[营业总收入-营业总收入], d.总股本
+        FROM dividend_data d
+        JOIN financial_report f ON d.qmt_code = f.qmt_code
+        WHERE f.[净利润-净利润] > 0 
+          AND f.净资产收益率 > 0
+          AND f.[营业总收入-营业总收入] > 100000000  -- 营收大于1亿，剔除空壳
+          AND d.[现金分红-股息率] > 0
+          AND d.qmt_code NOT LIKE '30%'   -- 剔除创业板
+          AND d.qmt_code NOT LIKE '68%'   -- 剔除科创板
+          AND d.qmt_code NOT LIKE '%.BJ'  -- 剔除北交所
+        ORDER BY d.[现金分红-股息率] DESC
+        LIMIT 60
+    """
+    try:
+        df_pool = pd.read_sql(query, conn)
+    except Exception as e:
+        print(f"读取数据库失败: {e}")
+        conn.close()
+        return []
+    finally:
+        conn.close()
+
+    candidate_stocks = df_pool['qmt_code'].tolist()
+    if not candidate_stocks:
+        print("本地数据库未筛选出符合条件的股票！")
+        return []
+
+    # 2. QMT 原生实时排雷与量价过滤
+    final_target_pool = []
+    xtdata.download_instrument_detail()
+    
+    # 【修正处 1：个股初筛行情下载】往前推10个自然日，确保覆盖5个交易日
+    start_date_stock = (datetime.datetime.now(BEIJING_TZ) - datetime.timedelta(days=10)).strftime("%Y%m%d")
+    xtdata.download_history_data2(candidate_stocks, period='1d', start_time=start_date_stock, end_time='')
+    
+    market_data = xtdata.get_market_data_ex(['close', 'amount'], candidate_stocks, period='1d', count=5)
+    
+    for _, row in df_pool.iterrows():
+        stock = row['qmt_code']
+        total_share = row['总股本']
+        
+        detail = xtdata.get_instrument_detail(stock)
+        if detail:
+            name = detail.get('InstrumentName', '')
+            if 'ST' in name or '退' in name:
+                continue
+                
+        if stock in market_data and not market_data[stock].empty:
+            df = market_data[stock]
+            latest_price = df['close'].iloc[-1]
+            avg_amount = df['amount'].mean()
+            
+            market_cap = total_share * latest_price if pd.notna(total_share) else 0
+            
+            if (latest_price <= Config.max_price and 
+                market_cap >= Config.min_market_cap and 
+                avg_amount > 20000000):  
+                
+                final_target_pool.append(stock)
+                
+        if len(final_target_pool) >= GlobalVar.stock_num:
+            break
+            
+    print(f"最终选股结果: {final_target_pool}")
+    return final_target_pool
+
+# ================= 4. 交易与风控模块 =================
+
+def check_stop_loss(trader, account):
+    """【风控】个股止盈止损与大盘趋势止损"""
+    positions = trader.query_stock_positions(account)
+    if not positions:
+        return
+        
+    # 1. 检查大盘暴跌系统性风险
+    # 【修正处 2：止损时的大盘行情下载】往前推 5 天，确保覆盖昨今 2 天
+    start_date_idx = (datetime.datetime.now(BEIJING_TZ) - datetime.timedelta(days=5)).strftime("%Y%m%d")
+    xtdata.download_history_data2([Config.index_code], period='1d', start_time=start_date_idx, end_time='')
+    idx_df = xtdata.get_market_data_ex(['close', 'open'], [Config.index_code], period='1d', count=1)[Config.index_code]
+    
+    if not idx_df.empty:
+        down_ratio = (idx_df['close'].iloc[-1] / idx_df['open'].iloc[-1]) - 1
+        if down_ratio <= -Config.stoploss_market:
+            print(f"大盘跌幅 {down_ratio:.2%} 触发止损!")
+            GlobalVar.market_crash = True
+
+    # 2. 检查个股
+    for pos in positions:
+        if pos.volume == 0 or pos.stock_code == Config.etf:
+            continue
+            
+        cost = pos.open_price
+        current_price = pos.market_value / pos.volume if pos.volume > 0 else 0
+        
+        if GlobalVar.market_crash:
+            order_target_volume(trader, account, pos.stock_code, 0, current_price, 'market_crash_sell')
+            continue
+            
+        if current_price >= cost * 2:
+            print(f"[{pos.stock_code}] 盈利100%触发止盈")
+            order_target_volume(trader, account, pos.stock_code, 0, current_price, 'take_profit')
+            
+        elif current_price < cost * (1 - Config.stoploss_limit):
+            print(f"[{pos.stock_code}] 跌幅超9%触发止损")
+            order_target_volume(trader, account, pos.stock_code, 0, current_price, 'stop_loss')
+
+def adjust_positions(trader, account, target_list):
+    """【目标调仓】对比当前持仓，执行卖出和买入，实现等权重调仓"""
+    positions = trader.query_stock_positions(account)
+    hold_list = [p.stock_code for p in positions if p.volume > 0]
+    
+    # 1. 卖出不在目标列表中的股票
+    for p in positions:
+        if p.volume > 0 and p.stock_code not in target_list:
+            print(f"调仓卖出: {p.stock_code}")
+            order_target_volume(trader, account, p.stock_code, 0, 0, 'rebalance_sell')
+            
+    time.sleep(3) # 等待委托反馈，释放资金
+    
+    # 2. 买入新标的 (等权买入)
+    asset = trader.query_stock_asset(account)
+    available_cash = asset.cash
+    buy_list = [s for s in target_list if s not in hold_list]
+    
+    if not buy_list or available_cash < 1000:
+        return
+        
+    cash_per_stock = available_cash / len(buy_list)
+    
+    # 【修正处 3：买入前的新标的行情下载】往前推 5 天，确保覆盖最新 1 天
+    start_date_buy = (datetime.datetime.now(BEIJING_TZ) - datetime.timedelta(days=5)).strftime("%Y%m%d")
+    for stock in buy_list:
+        xtdata.download_history_data2([stock], period='1d', start_time=start_date_buy, end_time='')
+        price_df = xtdata.get_market_data_ex(['close'], [stock], period='1d', count=1)
+        if stock in price_df and not price_df[stock].empty:
+            price = price_df[stock]['close'].iloc[-1]
+            volume = int(cash_per_stock / price / 100) * 100 # 向下取整到整百股
+            if volume > 0:
+                print(f"--> [发送订单] 动作: 买入 | 代码: {stock} | 数量: {volume}股 | 挂单价: {price} | 业务: rebalance_buy")
+                trader.order_stock(account, stock, xtconstant.STOCK_BUY, volume, xtconstant.LATEST_PRICE, price, 'strategy', 'rebalance_buy')
+
+def order_target_volume(trader, account, stock_code, target_vol, price, remark='adjust'):
+    """基础辅助函数：下单直到满足目标股数"""
+    positions = trader.query_stock_positions(account)
+    current_vol = 0
+    for p in positions:
+        if p.stock_code == stock_code:
+            current_vol = p.volume
+            break
+            
+    diff = target_vol - current_vol
+    if diff > 0:
+        print(f"--> [发送订单] 动作: 买入 | 代码: {stock_code} | 数量: {diff}股 | 挂单价: {price} | 业务: {remark}")
+        trader.order_stock(account, stock_code, xtconstant.STOCK_BUY, diff, xtconstant.LATEST_PRICE, price, 'strategy', remark) 
+    elif diff < 0:
+        sell_vol = abs(diff)
+        print(f"--> [发送订单] 动作: 卖出 | 代码: {stock_code} | 数量: {sell_vol}股 | 挂单价: {price} | 业务: {remark}")
+        trader.order_stock(account, stock_code, xtconstant.STOCK_SELL, sell_vol, xtconstant.LATEST_PRICE, price, 'strategy', remark)
+
+# ================= 5. 定时任务主循环 =================
+
+def run_strategy():
+    # 初始化交易接口
+    session_id = int(time.time())
+    trader = XtQuantTrader(Config.mini_qmt_path, session_id)
+    account = StockAccount(Config.account_id)
+    
+    trader.register_callback(MyCallback())
+    trader.start()
+    trader.connect()
+    trader.subscribe(account)
+    print("====== QMT 交易接口连接成功，策略启动 ======")
+
+    # 每日任务执行标记
+    task_done = {'09:05': False, '10:00': False, '14:00': False}
+    
+    while True:
+        now = datetime.datetime.now(BEIJING_TZ)
+        time_str = now.strftime("%H:%M")
+        
+        # 午夜重置任务标记
+        if time_str == "00:00":
+            for k in task_done.keys(): task_done[k] = False
+            GlobalVar.market_crash = False
+            time.sleep(60)
+
+        # 09:05 盘前准备：测算大盘趋势并更新仓位数量
+        if time_str == "09:05" and not task_done['09:05']:
+            GlobalVar.stock_num = get_market_trend_stock_num()
+            print(f"[{time_str}] 今日大盘趋势运算完成，计划持仓股数: {GlobalVar.stock_num}")
+            task_done['09:05'] = True
+
+        # 10:00 调仓时刻：风控检查 + 根据月份与基本面选股池调仓
+        if time_str == "10:00" and not task_done['10:00']:
+            check_stop_loss(trader, account)
+            
+            if now.month in Config.pass_months:
+                print(f"[{time_str}] 当前为规避月份({now.month}月)，空仓防雷，买入 ETF。")
+                adjust_positions(trader, account, [Config.etf])
+            else:
+                if not GlobalVar.market_crash:
+                    # 重新选股并调仓
+                    GlobalVar.target_list = get_fundamental_pool()
+                    adjust_positions(trader, account, GlobalVar.target_list)
+            task_done['10:00'] = True
+
+        # 14:00 下午风控：再次检查系统暴跌或个股止损
+        if time_str == "14:00" and not task_done['14:00']:
+            check_stop_loss(trader, account)
+            task_done['14:00'] = True
+
+        # 防止高频死循环占用CPU
+        time.sleep(1) 
+
+if __name__ == '__main__':
+    run_strategy()

@@ -357,7 +357,7 @@ class RobotTrader:
                 time.sleep(2) # 避开同一秒多次触发
             time.sleep(1)
     
-DEBUG = True              
+DEBUG = False              
 if __name__ == "__main__":
     bot = RobotTrader()
     if bot.connect():
