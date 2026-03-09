@@ -8,6 +8,7 @@ from xtquant import xtdata
 from xtquant.xttrader import XtQuantTrader, XtQuantTraderCallback
 from xtquant.xttype import StockAccount
 import xtquant.xtconstant as xtconstant
+import os, json
 
 # ================= 1. 全局配置与参数 =================
 BEIJING_TZ = timezone(timedelta(hours=8))
@@ -15,6 +16,7 @@ class Config:
     account_id = '47601131'  # 您的资金账号
     mini_qmt_path =  r'D:\光大证券金阳光QMT实盘\userdata_mini'  # 【必改】极简模式客户端安装路径
     db_path = r'C:\Users\xiusan\OneDrive\Investment\Quant_data\stock_data.db' # 【必改】本地SQLite数据库路径
+    blacklist_path = 'blacklist.json'
     
     # 策略核心参数
     pass_months = [1, 4]             # 空仓的月份 (规避年报、一季报披露期爆雷)
@@ -28,12 +30,31 @@ class Config:
     min_market_cap = 10_0000_0000    # 最小市值：10亿 (原代码中的10个亿)
     max_price = 50                   # 股票单价上限设置
 
+def load_blacklist():
+    """从本地 JSON 文件读取小黑屋数据"""
+    if os.path.exists(Config.blacklist_path):
+        try:
+            with open(Config.blacklist_path, 'r', encoding='utf-8') as f:
+                data = json.load(f)
+                print(f"--> 成功从本地恢复小黑屋记忆，当前黑名单包含 {len(data)} 只股票。")
+                return data
+        except Exception as e:
+            print(f"--> 读取小黑屋文件失败: {e}，将初始化为空。")
+    return {}
+def save_blacklist(blacklist_dict):
+    """将小黑屋数据保存到本地 JSON 文件"""
+    try:
+        with open(Config.blacklist_path, 'w', encoding='utf-8') as f:
+            json.dump(blacklist_dict, f, ensure_ascii=False, indent=4)
+    except Exception as e:
+        print(f"--> 保存小黑屋文件失败: {e}")
+
 class GlobalVar:
     target_list = []                 # 今日目标持仓
     stock_num = Config.base_stock_num
     market_crash = False             # 大盘是否暴跌
     # 【新增：止损冷却小黑屋】记录止损股票和日期，格式: {'600000.SH': datetime.date(2026, 3, 7)}
-    blacklist = {}                   
+    blacklist = load_blacklist()                   
 
 # ================= 2. 交易回调与状态管理 =================
 class MyCallback(XtQuantTraderCallback):
@@ -70,7 +91,7 @@ def get_market_trend_stock_num():
     elif -0.05 <= diff_pct < -0.02:  return 5
     else:                            return 6    
 
-def get_fundamental_pool():
+def get_fundamental_pool(limit=10):
     """从SQLite获取高分红/基本面达标股票，结合QMT进行市值、价格、ST排雷"""
     print("开始从本地数据库及QMT进行基本面选股...")
     
@@ -121,7 +142,9 @@ def get_fundamental_pool():
         # =======================================================
         if stock in GlobalVar.blacklist:
             # 严格使用 BEIJING_TZ 保持时区一致
-            days_banned = (datetime.datetime.now(BEIJING_TZ).date() - GlobalVar.blacklist[stock]).days
+            ban_date_str = GlobalVar.blacklist[stock]
+            ban_date = datetime.datetime.strptime(ban_date_str, "%Y-%m-%d").date()
+            days_banned = (datetime.datetime.now(BEIJING_TZ).date() - ban_date).days
             if days_banned < 30:  # 30天内不允许再买
                 print(f"    -> [风控拦截] 跳过 {stock}，触发止损后目前在 30 天冷却期内。")
                 continue
@@ -129,6 +152,7 @@ def get_fundamental_pool():
                 # 满30天了，刑满释放
                 print(f"    -> [风控释放] {stock} 止损冷却期已满 30 天，移除黑名单。")
                 del GlobalVar.blacklist[stock]
+                save_blacklist(GlobalVar.blacklist)
 
         total_share = row['总股本']
         
@@ -151,12 +175,46 @@ def get_fundamental_pool():
                 
                 final_target_pool.append(stock)
                 
-        if len(final_target_pool) >= GlobalVar.stock_num:
+        if len(final_target_pool) >= limit:
             break
             
     print(f"最终选股结果: {final_target_pool}")
     return final_target_pool
 
+def get_tolerant_target_list(trader, account, target_num, tolerance_pool_size=10):
+    """
+    获取带有“排名宽容度”的最终目标持仓名单
+    :param trader: 交易对象
+    :param account: 资金账号
+    :param target_num: 目标持仓数量 (即 GlobalVar.stock_num)
+    :param tolerance_pool_size: 宽容池大小 (建议设置为目标数量的2-3倍)
+    """
+    # 1. 获取当前真实持仓的股票代码（剔除银华日利ETF和空仓）
+    positions = trader.query_stock_positions(account)
+    current_holdings = [
+        pos.stock_code for pos in positions 
+        if pos.volume > 0 and pos.stock_code != Config.etf
+    ]
+
+    # 2. 从数据库获取放宽后的候选池 (排名前 tolerance_pool_size 的股票)
+    # 注意：你需要确保你的 get_fundamental_pool 函数能够接收 limit 参数
+    candidate_pool = get_fundamental_pool(limit=tolerance_pool_size) 
+    
+    target_list = []
+    
+    # 3. 优先保留老将：只要当前持仓在候选池(前15名)中，就继续保留在目标名单中
+    for stock in current_holdings:
+        if stock in candidate_pool:
+            target_list.append(stock)
+            
+    # 4. 填补空缺：如果当前达标的老将数量不足 target_num，则从候选池中最优秀的开始递补
+    for stock in candidate_pool:
+        if len(target_list) >= target_num:
+            break  # 名额已满，停止递补
+        if stock not in target_list:
+            target_list.append(stock)
+            
+    return target_list
 # ================= 4. 交易与风控模块 =================
 
 def check_stop_loss(trader, account):
@@ -179,7 +237,7 @@ def check_stop_loss(trader, account):
 
     # 2. 检查个股
     for pos in positions:
-        if pos.volume == 0 or pos.stock_code == Config.etf:
+        if pos.can_use_volume == 0 or pos.stock_code == Config.etf:
             continue
             
         cost = pos.open_price
@@ -195,28 +253,53 @@ def check_stop_loss(trader, account):
             
         elif current_price < cost * (1 - Config.stoploss_limit):
             print(f"[{pos.stock_code}] 跌幅超9%触发止损，关进 30 天小黑屋！")
+            # 原有的加入黑名单逻辑（记录当天的日期）
+            today_str = datetime.datetime.now(BEIJING_TZ).strftime("%Y-%m-%d")
+            GlobalVar.blacklist[pos.stock_code] = today_str
+            
+            # 【新增这一行】：立刻把更新后的小黑屋写进硬盘！
+            save_blacklist(GlobalVar.blacklist)
+
             order_target_volume(trader, account, pos.stock_code, 0, current_price, 'stop_loss')
-            # =======================================================
-            # 【新增：记录拉黑日期】使用统一的 BEIJING_TZ
-            # =======================================================
-            GlobalVar.blacklist[pos.stock_code] = datetime.datetime.now(BEIJING_TZ).date()
 
 def adjust_positions(trader, account, target_list):
     """【目标调仓】对比当前持仓，执行卖出和买入，实现等权重调仓"""
     positions = trader.query_stock_positions(account)
     hold_list = [p.stock_code for p in positions if p.volume > 0]
     
+    has_sell_order = False  # 新增标签
     # 1. 卖出不在目标列表中的股票
     for p in positions:
         if p.volume > 0 and p.stock_code not in target_list:
             print(f"调仓卖出: {p.stock_code}")
-            order_target_volume(trader, account, p.stock_code, 0, 0, 'rebalance_sell')
+            if order_target_volume(trader, account, p.stock_code, 0, 0, 'rebalance_sell'):
+                has_sell_order = True
             
-    time.sleep(3) # 等待委托反馈，释放资金
+    if has_sell_order:
+        print("已发送卖出指令，等待 120 秒确认成交释放资金...")
+        time.sleep(120) 
+
+    #重新获取 positions
+    positions = trader.query_stock_positions(account)
+    hold_list = [p.stock_code for p in positions if p.volume > 0]
+    # 2. 计算买入新标的的可用预算
+    # 计算本次调仓中，继续保留的老股票的当前总市值
+    retained_value = sum(
+        (p.open_price * p.volume) for p in positions 
+        if p.volume > 0 and p.stock_code in target_list
+    )
     
-    # 2. 买入新标的 (等权买入)
+    # 策略总额度 60000 扣除保留老股票的市值，得出可用于买新股的预算
+    # 使用 max(0, ...) 防止老股票盈利太多导致预算变成负数
+    target_total_capital = 60000
+    budget_for_new = max(0, target_total_capital - retained_value)
+    
+    # 获取账户实际可用资金（防止账户本身没钱了）
     asset = trader.query_stock_asset(account)
-    available_cash = min(asset.cash, 60000) #最多60000
+    
+    # 最终可用的买入资金 = 取“新股剩余预算”和“账户真实闲置资金”两者的较小值
+    available_cash = min(budget_for_new, asset.cash)
+
     buy_list = [s for s in target_list if s not in hold_list]
     
     if not buy_list or available_cash < 1000:
@@ -240,19 +323,28 @@ def order_target_volume(trader, account, stock_code, target_vol, price, remark='
     """基础辅助函数：下单直到满足目标股数"""
     positions = trader.query_stock_positions(account)
     current_vol = 0
+    can_use_vol = 0
     for p in positions:
         if p.stock_code == stock_code:
             current_vol = p.volume
+            can_use_vol = p.can_use_volume  # 获取实际可用(可卖)股数
             break
             
     diff = target_vol - current_vol
     if diff > 0:
         print(f"--> [发送订单] 动作: 买入 | 代码: {stock_code} | 数量: {diff}股 | 挂单价: {price} | 业务: {remark}")
         # trader.order_stock(account, stock_code, xtconstant.STOCK_BUY, diff, xtconstant.LATEST_PRICE, price, 'strategy', remark) 
+        return True
     elif diff < 0:
-        sell_vol = abs(diff)
-        print(f"--> [发送订单] 动作: 卖出 | 代码: {stock_code} | 数量: {sell_vol}股 | 挂单价: {price} | 业务: {remark}")
-        #trader.order_stock(account, stock_code, xtconstant.STOCK_SELL, sell_vol, xtconstant.LATEST_PRICE, price, 'strategy', remark)
+        sell_vol = min(abs(diff), can_use_vol)
+        if sell_vol > 0:
+            print(f"--> [发送订单] 动作: 卖出 | 代码: {stock_code} | 数量: {sell_vol}股 | 挂单价: {price} | 业务: {remark}")
+            #trader.order_stock(account, stock_code, xtconstant.STOCK_SELL, sell_vol, xtconstant.LATEST_PRICE, price, 'strategy', remark)
+            return True
+        else:
+            print(f"--> [忽略请求] {stock_code} 需卖出，但可用额度为 0 (可能是 T+1 锁仓或在途冻结)。")
+            return False
+    return False
 
 # ================= 5. 定时任务主循环 =================
 
@@ -289,16 +381,30 @@ def run_strategy():
 
         # 10:00 调仓时刻：风控检查 + 根据月份与基本面选股池调仓
         if DEBUG or (time_str == "10:00" and not task_done['10:00']):
+            # 每天 10:00 都检查止损
             check_stop_loss(trader, account)
+            
+            # 判断今天是不是周一 (weekday() == 0 代表周一)
+            is_rebalance_day = (now.weekday() == 0)
             
             if now.month in Config.pass_months:
                 print(f"[{time_str}] 当前为规避月份({now.month}月)，空仓防雷，买入 ETF。")
                 adjust_positions(trader, account, [Config.etf])
+            elif is_rebalance_day and not GlobalVar.market_crash:
+                # 只有周一且大盘未暴跌时，才进行基本面选股和调仓
+                print(f"[{time_str}] 今日是调仓日, 开始评估持仓排名与宽容度...")
+                # 调用带有宽容度的选股逻辑
+                # GlobalVar.stock_num 是通过大盘均线计算出的动态目标仓位数
+                GlobalVar.target_list = get_tolerant_target_list(
+                    trader, 
+                    account, 
+                    target_num=GlobalVar.stock_num, 
+                    tolerance_pool_size=10
+                )
+                adjust_positions(trader, account, GlobalVar.target_list)
             else:
-                if not GlobalVar.market_crash:
-                    # 重新选股并调仓
-                    GlobalVar.target_list = get_fundamental_pool()
-                    adjust_positions(trader, account, GlobalVar.target_list)
+                print(f"[{time_str}] 今日非调仓日，仅执行风控监控。")
+                
             task_done['10:00'] = True
 
         # 14:00 下午风控：再次检查系统暴跌或个股止损
@@ -313,3 +419,5 @@ def run_strategy():
 DEBUG = False
 if __name__ == '__main__':
     run_strategy()
+
+#Todo: 自己买入的股票的黑名单，以及T+1限制导致可用资金计算错误的bug
