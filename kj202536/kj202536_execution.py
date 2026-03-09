@@ -107,7 +107,7 @@ class Config:
     target_num = 3              # 同时持有ETF类别数
     
     # --- 交易设置 ---
-    check_time = "09:35:00"     # 每日调仓检查时间
+    check_time = "09:51:00"     # 每日调仓检查时间
 
     policy_asset = 60000
 
@@ -293,7 +293,7 @@ class RobotTrader:
         print(f"账户总资产: {asset.total_asset:.2f} | 本策略实际分配额度: {total_asset:.2f}")
         
         today_str = datetime.datetime.now(BEIJING_TZ).strftime("%Y%m%d")
- # ================= A. 卖出不再目标的标的 =================
+        # ================= A. 卖出不再目标的标的 =================
         for code in current_holdings.keys():
             if code not in target_list:
                 # 获取实际该卖的股数
@@ -317,6 +317,9 @@ class RobotTrader:
         # B. 买入目标 (按总资产比例)
         weight = 1.0 / len(target_list)
         for code in target_list:
+            if code in current_holdings.keys():
+                 print(f"当前已经持仓 {code}：跳过买入")
+                 continue
             target_value = total_asset * weight
             print(f"【调整计划】{code} | 目标价值: {target_value:.2f}")
             
@@ -348,7 +351,8 @@ class RobotTrader:
     def loop(self):
         print(f">>> 交易机器人已启动 (当前北京时间: {datetime.datetime.now(BEIJING_TZ).strftime('%H:%M:%S')})")
         while True:
-            now_bj = datetime.datetime.now(BEIJING_TZ)
+            now_bj = datetime.datetime.now(BEIJING_TZ).strftime('%H:%M:%S')
+            #print(now_bj)
             if DEBUG or now_bj == Config.check_time:
                 try:
                     self.execute_logic()
