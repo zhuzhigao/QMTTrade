@@ -16,7 +16,7 @@ import time
 DB_DIR = r'C:\Users\xiusan\OneDrive\Investment\Quant_data'
 if not os.path.exists(DB_DIR):
     os.makedirs(DB_DIR)
-DB_PATH = os.path.join(DB_DIR, 'fundamental_data.db')
+DB_PATH = os.path.join(DB_DIR, 'stock_data.db')
 BEIJING_TZ = timezone(timedelta(hours=8))
 
 def get_safe_report_dates():

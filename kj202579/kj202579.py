@@ -14,7 +14,7 @@ BEIJING_TZ = timezone(timedelta(hours=8))
 class Config:
     account_id = '47601131'  # 您的资金账号
     mini_qmt_path =  r'D:\光大证券金阳光QMT实盘\userdata_mini'  # 【必改】极简模式客户端安装路径
-    db_path = r'C:\Users\xiusan\OneDrive\Investment\Quant_data\fundamental_data.db' # 【必改】本地SQLite数据库路径
+    db_path = r'C:\Users\xiusan\OneDrive\Investment\Quant_data\stock_data.db' # 【必改】本地SQLite数据库路径
     
     # 策略核心参数
     pass_months = [1, 4]             # 空仓的月份 (规避年报、一季报披露期爆雷)
