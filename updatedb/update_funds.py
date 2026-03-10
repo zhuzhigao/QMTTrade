@@ -4,7 +4,7 @@ import sqlite3
 import datetime
 from pandas.api.types import is_numeric_dtype, is_string_dtype
 
-def save_dataframe_to_sqlite(df:pd.DataFrame , table_name: str, db_name="fund_data.db"):
+def save_dataframe_to_sqlite(df:pd.DataFrame , table_name: str, db_name="fund_data.db", append = False):
     print(df.columns.tolist()) # 查看所有列名
     print(df.head())           # 查看前5行数据
     
@@ -12,7 +12,7 @@ def save_dataframe_to_sqlite(df:pd.DataFrame , table_name: str, db_name="fund_da
         today = datetime.date.today().strftime("%Y-%m-%d")
         df['update_date'] = today
         conn = sqlite3.connect(db_name)
-        df.to_sql(table_name, conn, if_exists='append', index=False)
+        df.to_sql(table_name, conn, if_exists= 'append' if append else 'replace', index=False)
         print(f"成功！已将 {len(df)} 条基金数据存入数据库 [{db_name}] 的表 [{table_name}] 中。")
         print(f"当前更新日期：{today}")
         conn.close()
@@ -60,7 +60,7 @@ def save_manager_info_to_sqlite(db_name="fund_data.db"):
     except Exception as e:
         print(f"入库失败: {e}")
 
-def save_rating_info_to_sqlite(db_path="fund_data.db"):
+def save_rating_info_to_sqlite(db_name="fund_data.db"):
     print(">>> 正在拉取全市场基金评级数据 (ak.fund_rating_all)...")
     try:
         # 1. 获取原始数据
@@ -71,29 +71,27 @@ def save_rating_info_to_sqlite(db_path="fund_data.db"):
             print("未能获取到评级数据。")
             return
 
-        # --- 数字类处理 ---
         numeric_cols = ['5星评级家数', '上海证券', '招商证券', '济安金信', '晨星评级']
         for col in numeric_cols:
             if col in df.columns:
                 # 将 "---" 或其他非标字符替换为 NaN，并转为浮点数
                 df[col] = pd.to_numeric(df[col], errors='coerce')
 
-        # --- 手续费处理 ---
         if '手续费' in df.columns:
             df['手续费'] = df['手续费'].astype(str).str.replace('%', '', regex=False)
             df['手续费'] = pd.to_numeric(df['手续费'], errors='coerce')
 
-        save_dataframe_to_sqlite(df, 'rating', db_path )
+        save_dataframe_to_sqlite(df, 'rating', db_name )
     except Exception as e:
         print(f"入库失败: {e}")
 
-def batch_save_fund_analysis(fund_codes, db_path="fund_research.db"):
+def batch_save_fund_analysis(fund_codes, db_name="fund_research.db"):
     """
     批量获取基金风险指标（夏普、波动、回撤等）并存入 SQLite
     """
     all_dfs = []  # 用于存放每只基金的结果
     
-    conn = sqlite3.connect(db_path)
+    conn = sqlite3.connect(db_name)
     
     print(f">>> 开始抓取 {len(fund_codes)} 只基金的风险指标...")
     
@@ -143,12 +141,41 @@ def batch_save_fund_analysis(fund_codes, db_path="fund_research.db"):
         
     conn.close()
 
+def get_unique_fund_codes(db_name="fund_data.db"):
+    """
+    从指定的 SQLite 数据库中获取去重后的基金代码
+    """
+    try:
+        # 1. 建立数据库连接
+        conn = sqlite3.connect(db_name)
+        
+        # 2. 编写 SQL 语句：使用 DISTINCT 关键字对 "基金代码" 字段去重
+        # 注意：由于字段名是中文，SQL 语句中建议加上双引号
+        sql_query = 'SELECT DISTINCT "基金代码" FROM fund'
+        
+        # 3. 使用 pandas 读取数据，效率高且易于处理
+        df = pd.read_sql(sql_query, conn)
+        
+        # 4. 关闭连接
+        conn.close()
+        
+        # 5. 将结果转换为列表格式
+        print(df.head)
+        fund_list = df["基金代码"].tolist()
+        
+        print(f"成功提取基金代码，共计: {len(fund_list)} 只")
+        return fund_list
+
+    except Exception as e:
+        print(f"数据库读取出错: {e}")
+        return []
+    
 if __name__ == "__main__":
-    save_fund_rank_to_sqlite(r'C:\Users\xiusan\OneDrive\Investment\Quant_data\fund_data.db')
-    save_manager_info_to_sqlite(r'C:\Users\xiusan\OneDrive\Investment\Quant_data\fund_data.db')
-    save_rating_info_to_sqlite(r'C:\Users\xiusan\OneDrive\Investment\Quant_data\fund_data.db')
+    # save_fund_rank_to_sqlite(r'C:\Users\xiusan\OneDrive\Investment\Quant_data\fund_data.db')
+    # save_manager_info_to_sqlite(r'C:\Users\xiusan\OneDrive\Investment\Quant_data\fund_data.db')
+    # save_rating_info_to_sqlite(r'C:\Users\xiusan\OneDrive\Investment\Quant_data\fund_data.db')
    
-   
-    # print(ak.fund_individual_analysis_xq(symbol="675091"))
-    # print(ak.fund_individual_achievement_xq(symbol="675091"))
-    # print(ak.fund_individual_detail_hold_xq(symbol="675091"))
+    #get_unique_fund_codes(r'C:\Users\xiusan\OneDrive\Investment\Quant_data\fund_data.db')
+    print(ak.fund_individual_analysis_xq(symbol="010415"))
+    print(ak.fund_individual_achievement_xq(symbol="010415"))
+    print(ak.fund_individual_detail_hold_xq(symbol="010415"))
