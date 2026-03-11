@@ -5,6 +5,7 @@
 适用环境：光大证券金阳光QMT极速版 (后台需启动)
 资金账号：47601131
 """
+"运行日：每周一"
 
 import time
 import datetime
@@ -225,6 +226,10 @@ class RobotTrader:
     def execute_logic(self):
         bj_now = datetime.datetime.now(BEIJING_TZ)
         print(f"\n--- 触发例行检查 (北京时间): {bj_now.strftime('%Y-%m-%d %H:%M:%S')} ---")
+       
+       # 判断今天是不是周一 (0代表周一)
+        is_monday = (bj_now.weekday() == 0)
+
         # 1. 计算择时
         z = get_rsrs_signal()
         print(f"当前 RSRS Z-Score: {z:.2f}")
@@ -236,6 +241,10 @@ class RobotTrader:
         target_list = []
         if z > Config.buy_threshold:
             # 进攻模式
+            if not is_monday:
+                print(f"信号: 进攻 | 今日非周一调仓日，动量不变，保持当前持仓装死。")
+                return # 不是周一，直接退出函数，不进行换仓
+            
             scores = []
             
             print("\n>>> 资产池动量评分明细表:")
