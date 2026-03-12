@@ -1,9 +1,10 @@
 import os
 import json
 import datetime
+import requests
 from datetime import timezone, timedelta
 
-__all__ = ['StrategyLedger', 'BlacklistManager']
+__all__ = ['StrategyLedger', 'BlacklistManager', 'MessagePusher']
 
 BEIJING_TZ = timezone(timedelta(hours=8))
 
@@ -103,3 +104,62 @@ class StrategyLedger:
     def get_all(self):
         """获取当前策略名下的所有股票"""
         return self.holdings
+    
+
+class MessagePusher:
+    """
+    通用消息推送类 (支持多策略调用)
+    微信推送服务：Pushplus
+    """
+    def __init__(self):
+        # --- 在此硬编码您的唯一 Token ---
+        self.token = "cee05e0d24e047e89720d57a4dc6ab51"
+        self.api_url = "http://www.pushplus.plus/send"
+
+    def send_text(self, title, content):
+        """发送纯文本或自定义HTML消息"""
+        payload = {
+            "token": self.token,
+            "title": title,
+            "content": content,
+            "template": "html"
+        }
+        try:
+            # 增加 timeout 防止网络延迟阻塞策略交易逻辑
+            requests.post(self.api_url, data=json.dumps(payload).encode('utf-8'), timeout=10)
+            print(f">>> [推送成功] {title}")
+        except Exception as e:
+            print(f">>> [推送异常] {e}")
+
+    def send_strategy_report(self, strategy_name, buys=None, sells=None, extra_msg=""):
+        """
+        生成标准化的策略调仓报告
+        :param strategy_name: 策略名称 (如 '36号策略', '双均线策略')
+        :param buys: 买入列表，格式为 ['标的代码 名称 价格', ...]
+        :param sells: 卖出列表，格式为 ['标的代码 名称 数量', ...]
+        :param extra_msg: 额外的备注信息
+        """
+        now = datetime.datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+        
+        # 构建 HTML 内容
+        html = f"<b>策略名称：</b>{strategy_name}<br>"
+        html += f"<b>报告时间：</b>{now}<br><hr>"
+        
+        if not buys and not sells:
+            html += "<p style='color:gray;'>今日信号稳定，持仓无变动。</p>"
+        else:
+            if sells:
+                html += "<b>【卖出动作】</b><br>"
+                for s in sells:
+                    html += f"<span style='color:red;'>↓ {s}</span><br>"
+            
+            if buys:
+                html += "<br><b>【买入动作】</b><br>"
+                for b in buys:
+                    html += f"<span style='color:green;'>↑ {b}</span><br>"
+        
+        if extra_msg:
+            html += f"<br><small>备注：{extra_msg}</small>"
+        
+        # 发送标题带上策略名，方便在微信列表区分
+        self.send_text(f"调仓报告-{strategy_name}", html)

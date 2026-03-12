@@ -15,6 +15,7 @@ import pandas as pd
 from scipy import stats
 from xtquant import xtdata,xtconstant
 from xtquant.xttrader import XtQuantTrader
+from utils.utilities import MessagePusher
 
 BEIJING_TZ = timezone(timedelta(hours=8))
 
@@ -121,6 +122,7 @@ def get_rsrs_signal():
     # 获取历史数据
     start_date = (datetime.datetime.now(BEIJING_TZ) - datetime.timedelta(days=Config.rsrs_m + Config.rsrs_n)).strftime("%Y%m%d")
     xtdata.download_history_data(Config.index_code, period='1d', start_time=start_date, end_time='')
+    xtdata.download_history_data(Config.index_code, period='1m', start_time=datetime.datetime.now(BEIJING_TZ).strftime("%Y%m%d"), end_time='')
 
     data = xtdata.get_market_data_ex(['high', 'low'], [Config.index_code], period='1d', count=Config.rsrs_m + Config.rsrs_n, dividend_type='front')[Config.index_code]
     
@@ -194,6 +196,7 @@ def get_momentum_score(code):
         # 获取历史数据
     start_date = (datetime.datetime.now(BEIJING_TZ) - datetime.timedelta(days=Config.rsrs_m + Config.rsrs_n)).strftime("%Y%m%d")
     xtdata.download_history_data(code, period='1d', start_time=start_date, end_time='')
+    xtdata.download_history_data(code, period='1m', start_time=datetime.datetime.now(BEIJING_TZ).strftime("%Y%m%d"), end_time='')
 
     data = xtdata.get_market_data_ex(['close'], [code], period='1d', count=Config.rank_days)[code]
     prices = data['close'].values
@@ -211,6 +214,7 @@ class RobotTrader:
     def __init__(self):
         self.trader = XtQuantTrader(Config.qmt_path, Config.session_id)
         self.acc = XtStockAccount(Config.acc_id)
+        self.pusher = MessagePusher()
         
     def connect(self):
         self.trader.start()
@@ -300,6 +304,9 @@ class RobotTrader:
         asset = self.trader.query_stock_asset(self.acc)
         total_asset = min(asset.total_asset, Config.policy_asset)
         print(f"账户总资产: {asset.total_asset:.2f} | 本策略实际分配额度: {total_asset:.2f}")
+
+        buy_records = []
+        sell_records = []
         
         today_str = datetime.datetime.now(BEIJING_TZ).strftime("%Y%m%d")
         # ================= A. 卖出不再目标的标的 =================
@@ -317,7 +324,10 @@ class RobotTrader:
                         print(f"【准备卖出】{code} | 单价: {current_price} | 数量: {sell_vol}股 | 逻辑: 调出目标池")
                         
                         # 发送真实的卖出委托 (24代表卖出，或者用 xtconstant.STOCK_SELL)
-                        self.trader.order_stock(self.acc, code, xtconstant.STOCK_SELL, sell_vol, xtconstant.FIX_PRICE, current_price, "36_Strategy_Sell", remark)
+                        seq = self.trader.order_stock(self.acc, code, xtconstant.STOCK_SELL, sell_vol, xtconstant.FIX_PRICE, current_price, "36_Strategy_Sell", remark)
+                        if (seq != -1):
+                            name = Config.symbol_to_name.get(code, code)
+                            sell_records.append(f"{name}({code}) | 数量: {sell_vol}")
                     else:
                         print(f"  -> 获取 {code} 最新价失败，跳过卖出")
                 except Exception as e:
@@ -350,13 +360,18 @@ class RobotTrader:
                 if target_volume > 0:
                     print(f"【实际买入】{code} | 单价: {current_price} | 数量: {target_volume}股")
                     # 参数说明: 23=买入, target_volume=买入股数, 11=本方最优(市价/最新价单)
-                    self.trader.order_stock(self.acc, code, xtconstant.STOCK_BUY, target_volume, xtconstant.FIX_PRICE, current_price, "36_Strategy_Buy", remark)
+                    seq = self.trader.order_stock(self.acc, code, xtconstant.STOCK_BUY, target_volume, xtconstant.FIX_PRICE, current_price, "36_Strategy_Buy", remark)
+                    if (seq != -1):
+                        name = Config.symbol_to_name.get(code, code)
+                        buy_records.append(f"{name}({code}) | 价格: {current_price} | 数量: {target_volume}")
                 else:
                     print(f"  -> {code} 计算出的买入股数不足 1 手，无法下单")
                     
             except Exception as e:
                 print(f"  -> {code} 订单生成时报错: {e}")
-                
+
+        self.pusher.send_strategy_report("36号策略", buys=buy_records, sells=sell_records)
+
     def loop(self):
         print(f">>> 交易机器人已启动 (当前北京时间: {datetime.datetime.now(BEIJING_TZ).strftime('%H:%M:%S')})")
         while True:
