@@ -9,12 +9,23 @@
 
 import time
 import datetime
+import os, sys
 from datetime import timezone, timedelta
 import numpy as np
 import pandas as pd
 from scipy import stats
 from xtquant import xtdata,xtconstant
 from xtquant.xttrader import XtQuantTrader
+
+# 获取当前脚本的绝对路径
+current_dir = os.path.dirname(os.path.abspath(__file__))
+# 获取当前脚本的上一级目录（即 QMTTrade 根目录）
+parent_dir = os.path.dirname(current_dir)
+
+# 如果根目录不在搜索路径里，就把它加进去
+if parent_dir not in sys.path:
+    sys.path.append(parent_dir)
+
 from utils.utilities import MessagePusher
 
 BEIJING_TZ = timezone(timedelta(hours=8))
