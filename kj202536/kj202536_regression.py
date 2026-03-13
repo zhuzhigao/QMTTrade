@@ -19,14 +19,37 @@ END_DATE = '20260201'
 INDEX_CODE = '000300.SH'
 BOND_ETF = '511010.SH'
 ETF_GROUPS = {
-    'Commodity': ['159985.SZ', '159981.SZ', '159980.SZ', '518880.SH'],
-    'Dividend':  ['510880.SH', '512890.SH'],
-    'Core':      ['510150.SH', '159967.SZ', '588000.SH'],
-    'Global':    ['513100.SH', '513500.SH', '513030.SH'],
-}
+        'Commodity': {
+            '518880.SH': '黄金ETF', 
+            '159980.SZ': '有色ETF', 
+            '159981.SZ': '能化ETF', 
+            '159985.SZ': '豆粕ETF'
+        },
+        'Dividend_Value':  { # 红利与价值
+            '512890.SH': '红利低波ETF',
+            '561560.SH': '电力ETF',
+            '511260.SH': '十年国债ETF' # 也可以把长债放入此处作为防御轮动
+        },
+        'Core_Growth': { # 境内核心宽基
+            '510150.SH': '上证50', 
+            '588000.SH': '科创50', 
+            '159845.SZ': '中证1000', # 捕捉小盘行情
+            '159967.SZ': '创蓝筹'
+        },
+        'Global_Market': { # 全球配置
+            '513100.SH': '纳指ETF', 
+            '513520.SH': '日经225',
+            '513180.SH': '恒生科技'  # 新增：港股科技
+        },
+        'Sector_Alpha': { # 高贝塔行业主题 (新增组)
+            '512480.SH': '半导体ETF',
+            '159892.SZ': '恒生医疗', 
+            '512660.SH': '军工ETF'
+        }
+    }
 
 # 展平资产池
-ALL_SYMBOLS = [item for sublist in ETF_GROUPS.values() for item in sublist] + [BOND_ETF]
+ALL_SYMBOLS =  all_symbols = [code for group in ETF_GROUPS.values() for code in group.keys()] + [BOND_ETF]
 
 RSRS_N = 18
 RSRS_M = 600
@@ -64,7 +87,7 @@ lows = idx_data['low'].values
 for i in tqdm(range(RSRS_N, len(idx_data))):
     y = highs[i-RSRS_N : i]
     x = lows[i-RSRS_N : i]
-    slope, _, _, _, _ = stats.linregress(x, y)
+    slope, _, rvalue, _, _ = stats.linregress(x, y)
     rsrs_slopes.iloc[i] = slope
 
 # 计算 Z-Score (使用前 M 天的数据)

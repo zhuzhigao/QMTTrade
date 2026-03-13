@@ -120,7 +120,7 @@ class Config:
     target_num = 3              # 同时持有ETF类别数
     
     # --- 交易设置 ---
-    check_time = "14:50:00"     # 每日调仓检查时间
+    check_time = "09:50:00"     # 每日调仓检查时间
 
     policy_asset = 60000
 
@@ -335,10 +335,11 @@ class RobotTrader:
                         print(f"【准备卖出】{code} | 单价: {current_price} | 数量: {sell_vol}股 | 逻辑: 调出目标池")
                         
                         # 发送真实的卖出委托 (24代表卖出，或者用 xtconstant.STOCK_SELL)
-                        seq = self.trader.order_stock(self.acc, code, xtconstant.STOCK_SELL, sell_vol, xtconstant.FIX_PRICE, current_price, "36_Strategy_Sell", remark)
-                        if (seq != -1):
-                            name = Config.symbol_to_name.get(code, code)
-                            sell_records.append(f"{name}({code}) | 数量: {sell_vol}")
+                        if not DEBUG:
+                            seq = self.trader.order_stock(self.acc, code, xtconstant.STOCK_SELL, sell_vol, xtconstant.FIX_PRICE, current_price, "36_Strategy_Sell", remark)
+                            if (seq != -1):
+                                name = Config.symbol_to_name.get(code, code)
+                                sell_records.append(f"{name}({code}) | 数量: {sell_vol}")
                     else:
                         print(f"  -> 获取 {code} 最新价失败，跳过卖出")
                 except Exception as e:
@@ -371,10 +372,11 @@ class RobotTrader:
                 if target_volume > 0:
                     print(f"【实际买入】{code} | 单价: {current_price} | 数量: {target_volume}股")
                     # 参数说明: 23=买入, target_volume=买入股数, 11=本方最优(市价/最新价单)
-                    seq = self.trader.order_stock(self.acc, code, xtconstant.STOCK_BUY, target_volume, xtconstant.FIX_PRICE, current_price, "36_Strategy_Buy", remark)
-                    if (seq != -1):
-                        name = Config.symbol_to_name.get(code, code)
-                        buy_records.append(f"{name}({code}) | 价格: {current_price} | 数量: {target_volume}")
+                    if not DEBUG:
+                        seq = self.trader.order_stock(self.acc, code, xtconstant.STOCK_BUY, target_volume, xtconstant.FIX_PRICE, current_price, "36_Strategy_Buy", remark)
+                        if (seq != -1):
+                            name = Config.symbol_to_name.get(code, code)
+                            buy_records.append(f"{name}({code}) | 价格: {current_price} | 数量: {target_volume}")
                 else:
                     print(f"  -> {code} 计算出的买入股数不足 1 手，无法下单")
                     
