@@ -2,13 +2,23 @@
 import time
 import datetime
 from datetime import timezone, timedelta
-import json,os
+import sys,os
 import sqlite3
 import pandas as pd
 from xtquant import xtdata
 from xtquant.xttrader import XtQuantTrader, XtQuantTraderCallback
 from xtquant.xttype import StockAccount
 import xtquant.xtconstant as xtconstant
+
+# 获取当前脚本的绝对路径
+current_dir = os.path.dirname(os.path.abspath(__file__))
+# 获取当前脚本的上一级目录（即 QMTTrade 根目录）
+parent_dir = os.path.dirname(current_dir)
+
+# 如果根目录不在搜索路径里，就把它加进去
+if parent_dir not in sys.path:
+    sys.path.append(parent_dir)
+
 from utils.utilities import StrategyLedger, BlacklistManager
 # ================= 1. 全局配置与参数 =================
 BEIJING_TZ = timezone(timedelta(hours=8))
@@ -82,9 +92,17 @@ def get_fundamental_pool(limit=10):
     # 1. 连接本地数据库
     conn = sqlite3.connect(Config.db_path)
     query = """
-        SELECT d.qmt_code, d.[现金分红-股息率], f.净资产收益率, f.[净利润-净利润], f.[营业总收入-营业总收入], d.总股本
+        SELECT 
+            d.qmt_code, 
+            i.industry,   -- 【新增】把行业名称提取出来
+            d.[现金分红-股息率], 
+            f.净资产收益率, 
+            f.[净利润-净利润], 
+            f.[营业总收入-营业总收入], 
+            d.总股本
         FROM dividend_data d
         JOIN financial_report f ON d.qmt_code = f.qmt_code
+        LEFT JOIN stock_industry i ON d.qmt_code = i.qmt_code  -- 【新增】关联行业表
         WHERE f.[净利润-净利润] > 0 
           AND f.净资产收益率 > 0
           AND f.[营业总收入-营业总收入] > 100000000  -- 营收大于1亿，剔除空壳
@@ -92,6 +110,15 @@ def get_fundamental_pool(limit=10):
           AND d.qmt_code NOT LIKE '30%'   -- 剔除创业板
           AND d.qmt_code NOT LIKE '68%'   -- 剔除科创板
           AND d.qmt_code NOT LIKE '%.BJ'  -- 剔除北交所
+          
+          -- 【极致防雷：过去三年内，绝对不能出现过除 1, 2和6 以外的任何审计意见】
+          AND d.qmt_code NOT IN (
+              SELECT qmt_code 
+              FROM audit_report 
+              WHERE opinion_type_id NOT IN (1, 2, 6)  
+                AND pub_date >= date('now', '-3 years')
+          )
+          
         ORDER BY d.[现金分红-股息率] DESC
         LIMIT 60
     """
@@ -120,6 +147,7 @@ def get_fundamental_pool(limit=10):
     
     for _, row in df_pool.iterrows():
         stock = row['qmt_code']
+        industry = row['industry'] if pd.notna(row['industry']) else '未知行业'
         
         # =======================================================
         # 【新增：检查是否在止损冷却小黑屋中】
@@ -156,13 +184,17 @@ def get_fundamental_pool(limit=10):
             if (latest_price <= Config.max_price and 
                 market_cap >= Config.min_market_cap and 
                 avg_amount > 20000000):  
-                
-                final_target_pool.append(stock)
+                final_target_pool.append({
+                    'stock': stock,
+                    'industry': industry
+                })
                 
         if len(final_target_pool) >= limit:
             break
             
-    print(f"最终选股结果: {final_target_pool}")
+    print(f"基础选股结果({len(final_target_pool)}只):")
+    for item in final_target_pool:
+        print(f"  - {item['stock']} [{item['industry']}]")
     return final_target_pool
 
 def get_tolerant_target_list(trader, account, target_num, tolerance_pool_size=10):
@@ -183,21 +215,47 @@ def get_tolerant_target_list(trader, account, target_num, tolerance_pool_size=10
     # 2. 从数据库获取放宽后的候选池 (排名前 tolerance_pool_size 的股票)
     # 注意：你需要确保你的 get_fundamental_pool 函数能够接收 limit 参数
     candidate_pool = get_fundamental_pool(limit=tolerance_pool_size) 
-    
+    candidate_stocks = [item['stock'] for item in candidate_pool]
+    stock_to_industry = {item['stock']: item['industry'] for item in candidate_pool}
+
     target_list = []
+    industry_count = {}
+    max_per_industry = 2
     
-    # 3. 优先保留老将：只要当前持仓在候选池(前15名)中，就继续保留在目标名单中
+    # 3. 优先保留老将：只要当前持仓在候选池(前tolerance_pool_size名)中，就继续保留在目标名单中
     for stock in current_holdings:
-        if stock in candidate_pool:
-            target_list.append(stock)
-            
+        if stock in candidate_stocks:
+            industry = stock_to_industry[stock]
+            # 行业风控检查（即使是老将也要接受行业集中度审查）
+            if industry_count.get(industry, 0) < max_per_industry:
+                target_list.append(stock)
+                industry_count[industry] = industry_count.get(industry, 0) + 1
+                print(f"    -> [保留老将] {stock} (行业: {industry})")
+            else:
+                print(f"    -> [剔除老将] {stock} 所在行业 [{industry}] 已达上限，忍痛调出。")
+
     # 4. 填补空缺：如果当前达标的老将数量不足 target_num，则从候选池中最优秀的开始递补
-    for stock in candidate_pool:
+    for item in candidate_pool:
         if len(target_list) >= target_num:
-            break  # 名额已满，停止递补
-        if stock not in target_list:
-            target_list.append(stock)
-            
+            break  # 名额已满，停止递补           
+        new_stock = item['stock']
+        new_industry = item['industry']
+        
+        # 只有当这只股票还没被加入，且它的行业还没满额时，才进行递补
+        if new_stock not in target_list:
+            if industry_count.get(new_industry, 0) < max_per_industry:
+                target_list.append(new_stock)
+                industry_count[new_industry] = industry_count.get(new_industry, 0) + 1
+                print(f"    -> [递补新兵] {new_stock} (行业: {new_industry})")
+            else:
+                # 触发行业风控，直接跳过寻找下一只
+                pass
+    
+    print(f"基础选股结果({len(target_list)}只):")
+    for stock in target_list:
+        print(f"{item}")
+    print(target_list)
+
     return target_list
 # ================= 4. 交易与风控模块 =================
 
@@ -235,7 +293,7 @@ def check_stop_loss(trader, account):
             continue
             
         if current_price >= cost * (1+Config.stopearning_limit):
-            print(f"[{pos.stock_code}] 盈利100%触发止盈")
+            print(f"[{pos.stock_code}] 触发止盈")
             order_target_volume(trader, account, pos.stock_code, 0, current_price, 'take_profit')
             
         elif current_price < cost * (1 - Config.stoploss_limit):
@@ -335,7 +393,8 @@ def order_target_volume(trader, account, stock_code, target_vol, price, remark='
     if diff > 0:
         print(f"--> [发送订单] 动作: 买入 | 代码: {stock_code} | 数量: {diff}股 | 挂单价: {price} | 业务: {remark}")
         seq = -1
-        # seq = trader.order_stock(account, stock_code, xtconstant.STOCK_BUY, diff, xtconstant.LATEST_PRICE, price, 'strategy', remark) 
+        if not DEBUG:
+            seq = trader.order_stock(account, stock_code, xtconstant.STOCK_BUY, diff, xtconstant.LATEST_PRICE, price, 'strategy', remark) 
         # 只要柜台没有立刻报错拒单，就先记账！
         # 如果后续没成交，下一次调仓时的容错代码会自动把它从账本里删掉
         if seq != -1:
@@ -348,7 +407,8 @@ def order_target_volume(trader, account, stock_code, target_vol, price, remark='
         if sell_vol > 0:
             print(f"--> [发送订单] 动作: 卖出 | 代码: {stock_code} | 数量: {sell_vol}股 | 挂单价: {price} | 业务: {remark}")
             
-            #seq = trader.order_stock(account, stock_code, xtconstant.STOCK_SELL, sell_vol, xtconstant.LATEST_PRICE, price, 'strategy', remark)
+            if not DEBUG:
+                seq = trader.order_stock(account, stock_code, xtconstant.STOCK_SELL, sell_vol, xtconstant.LATEST_PRICE, price, 'strategy', remark)
             # 卖出我们不需要手动 remove 账本
             # 如果卖出成交了，下一次调仓时容错代码查不到持仓，会自动 remove
             if seq == -1:

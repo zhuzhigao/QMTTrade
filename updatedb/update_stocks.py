@@ -159,6 +159,72 @@ def update_financial_report_to_db():
     except Exception as e:
         print(f"❌ 获取深度财务报表最终失败: {e}")
 
+
+def update_industry_data_to_db():
+    """
+    【新增模块】通过 AKShare 拉取全市场“申万一级行业”分类，并存入本地 SQLite
+    """
+    print("=" * 40)
+    print("正在拉取申万全市场行业分类，由于需要遍历约30个行业，请耐心等待1-2分钟...")
+    
+    try:
+        # 1. 获取申万一级行业列表
+        industry_list_df = ak.sw_index_first_info()
+        all_stocks_industry = []
+        
+        # 2. 遍历每个行业，获取该行业下的成分股
+        for index, row in industry_list_df.iterrows():
+            industry_code = row['行业代码']
+            industry_name = row['行业名称']
+            industry_code = str(industry_code).split('.')[0]
+            try:
+                # 获取该行业下的所有成分股
+                cons_df = ak.index_component_sw(symbol=industry_code) 
+                print(cons_df.head())
+                
+                if not cons_df.empty:
+                    cons_df['industry'] = industry_name
+                    all_stocks_industry.append(cons_df)
+                    
+                time.sleep(1) # 申万反爬极严，必须慢点
+                
+            except Exception as e:
+                print(f"  - 拉取行业 [{industry_name}] 成分股时出错跳过: {e}")
+                continue
+                
+        # 3. 合并成全市场大表
+        if not all_stocks_industry:
+            print("❌ 未能获取到任何行业数据！")
+            return False
+            
+        final_df = pd.concat(all_stocks_industry, ignore_index=True)
+        
+        # 4. 转换 QMT 代码格式 (调用你脚本上方写好的 format_qmt_code 函数)
+        final_df['qmt_code'] = final_df['证券代码'].apply(format_qmt_code)
+        
+        # 去重并只保留我们需要的两列
+        result_df = final_df[['qmt_code', 'industry']].drop_duplicates(subset=['qmt_code'])
+        
+        # 5. 写入本地 SQLite 数据库
+        conn = get_db_connection()
+        if conn is None:
+            return False
+            
+        result_df.to_sql('stock_industry', conn, if_exists='replace', index=False)
+        
+        # 建立索引以加快实盘查询速度
+        cursor = conn.cursor()
+        cursor.execute('CREATE INDEX IF NOT EXISTS idx_industry_qmt_code ON stock_industry (qmt_code);')
+        conn.commit()
+        conn.close()
+        
+        print(f"✅ 行业分类更新成功！共为 {len(result_df)} 只股票打上了行业标签。")
+        return True
+        
+    except Exception as e:
+        print(f"❌ 更新行业分类失败: {e}")
+        return False
+    
 def update_audit_report_to_db(csv_path='audit_report.csv'):
     """
     【新增模块】读取从聚宽导出的 CSV 文件并更新到本地 SQLite 的 audit_report 表中
@@ -220,6 +286,8 @@ if __name__ == '__main__':
     # update_financial_report_to_db()
     # time.sleep(3) # 模块间休眠
 
-    update_audit_report_to_db()
+    #update_industry_data_to_db()
+    
+    #update_audit_report_to_db()
     
     print("\n🎉 所有数据更新程序执行完毕！")
