@@ -159,15 +159,67 @@ def update_financial_report_to_db():
     except Exception as e:
         print(f"❌ 获取深度财务报表最终失败: {e}")
 
+def update_audit_report_to_db(csv_path='audit_report.csv'):
+    """
+    【新增模块】读取从聚宽导出的 CSV 文件并更新到本地 SQLite 的 audit_report 表中
+    强制清洗 pub_date 为标准日期字符串，opinion_type_id 为整数
+    """
+    print("=" * 40)
+    print(f"正在更新审计意见表 (从本地 {csv_path} 导入)...")
+    
+    # 检查 CSV 文件是否存在
+    if not os.path.exists(csv_path):
+        print(f"❌ 找不到文件: {csv_path}")
+        print("请确保已将从聚宽导出的 audit_report.csv 放在与本脚本同目录下。")
+        return False
+        
+    try:
+        # 1. 读取 CSV 数据
+        df_audit = pd.read_csv(csv_path)
+        
+        # 2. 【核心】数据类型强制清洗
+        # 将 pub_date 转换为标准的 'YYYY-MM-DD' 字符串格式，方便 SQLite 进行日期比对
+        df_audit['pub_date'] = pd.to_datetime(df_audit['pub_date'], errors='coerce').dt.strftime('%Y-%m-%d')
+        
+        # 将 opinion_type_id 强制转换为数值型（如有空值填充为0，最后转为整数）
+        df_audit['opinion_type_id'] = pd.to_numeric(df_audit['opinion_type_id'], errors='coerce').fillna(-1).astype(int)
+        
+        # 剔除那些日期转换失败（NaT/NaN）的异常行
+        df_audit = df_audit.dropna(subset=['pub_date', 'qmt_code'])
+        
+        # 3. 写入数据库
+        conn = get_db_connection()
+        if conn is None:
+            return False
+            
+        # 写入数据库，每次采用覆盖（replace）的方式
+        df_audit.to_sql('audit_report', conn, if_exists='replace', index=False)
+        
+        # 建议：为 qmt_code 建一个索引，加快实盘策略时的查询速度
+        cursor = conn.cursor()
+        cursor.execute('CREATE INDEX IF NOT EXISTS idx_audit_qmt_code ON audit_report (qmt_code);')
+        conn.commit()
+        conn.close()
+        
+        print(f"✅ 审计意见表更新成功！共清洗并导入 {len(df_audit)} 条记录。")
+        return True
+        
+    except Exception as e:
+        print(f"❌ 更新审计意见表失败: {e}")
+        return False
+    
 # ================= 3. 执行主入口 =================
 if __name__ == '__main__':
     print("="*60)
     print("====== 宽客本地全量因子数据库更新程序启动 (实盘重试版) ======")
     print("="*60)
     
-    update_dividend_data_to_db()
-    time.sleep(3) # 模块间休眠
+    # update_dividend_data_to_db()
+    # time.sleep(3) # 模块间休眠
     
-    update_financial_report_to_db()
+    # update_financial_report_to_db()
+    # time.sleep(3) # 模块间休眠
+
+    update_audit_report_to_db()
     
     print("\n🎉 所有数据更新程序执行完毕！")

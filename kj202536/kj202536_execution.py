@@ -120,7 +120,7 @@ class Config:
     target_num = 3              # 同时持有ETF类别数
     
     # --- 交易设置 ---
-    check_time = "09:50:00"     # 每日调仓检查时间
+    check_time = "14:50:00"     # 每日调仓检查时间
 
     policy_asset = 60000
 
