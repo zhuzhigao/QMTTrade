@@ -10,6 +10,7 @@
 import time
 import datetime
 import os, sys
+import argparse
 from datetime import timezone, timedelta
 import numpy as np
 import pandas as pd
@@ -396,10 +397,26 @@ class RobotTrader:
                 except Exception as e:
                     print(f"运行时发生错误: {e}")
                 time.sleep(2) # 避开同一秒多次触发
+            if DEBUG:
+                break
             time.sleep(1)
     
 DEBUG = False              
 if __name__ == "__main__":
+    parser = argparse.ArgumentParser(description="金阳光 QMT 极简模式策略36 启动器")
+    
+    parser.add_argument('-m', '--mode', type=str, help='运行模式: REAL 或 DEBUG')
+    
+    # 3. 解析命令行参数
+    args = parser.parse_args()
+    
+    # 4. 根据参数逻辑设置 DEBUG 状态
+    if args.mode == 'REAL':
+        print(">>> 当前处于 [REAL 实盘模式]：请注意风险！")
+        DEBUG = False
+    else:
+        print(">>> 当前处于 [DEBUG 调试模式]：仅输出日志，不触发真实报单。")
+        DEBUG = True
     bot = RobotTrader()
     if bot.connect():
         bot.loop()
