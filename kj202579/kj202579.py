@@ -2,6 +2,7 @@
 import time
 import datetime
 from datetime import timezone, timedelta
+import argparse
 import sys,os
 import sqlite3
 import pandas as pd
@@ -60,13 +61,20 @@ class MyCallback(XtQuantTraderCallback):
         print(f"成交回报: {trade.stock_code}, 数量: {trade.traded_volume}, 价格: {trade.traded_price}")
 
 
+def on_progress(res):
+    print(f"下载进度: {res}")
+
+def download_data(stock_list, period, start_time, end_time, callback = None):
+     time.sleep(1)
+     xtdata.download_history_data2(stock_list, period=period, start_time=start_time, end_time=end_time, callback=callback)
 
 # ================= 3. 核心选股与信号模块 =================
 def get_market_trend_stock_num():
     """动态仓位控制：根据沪深300与10日均线的偏离度(乖离率)决定持仓数量"""
     # 往前推 40 个自然日，绝对保证覆盖 20 个交易日
+    print("动态仓位控制：根据沪深300与10日均线的偏离度(乖离率)决定持仓数量")
     start_date = (datetime.datetime.now(BEIJING_TZ) - datetime.timedelta(days=40)).strftime("%Y%m%d")
-    xtdata.download_history_data2([Config.index_code], period='1d', start_time=start_date, end_time='')
+    download_data([Config.index_code], period='1d', start_time=start_date, end_time='', callback=on_progress)
     df = xtdata.get_market_data_ex(['close'], [Config.index_code], period='1d', count=20, dividend_type='front')[Config.index_code]
     
     if df.empty or len(df) < 10:
@@ -94,6 +102,7 @@ def get_fundamental_pool(limit=10):
     query = """
         SELECT 
             d.qmt_code, 
+            d.名称,
             i.industry,   -- 【新增】把行业名称提取出来
             d.[现金分红-股息率], 
             f.净资产收益率, 
@@ -120,7 +129,7 @@ def get_fundamental_pool(limit=10):
           )
           
         ORDER BY d.[现金分红-股息率] DESC
-        LIMIT 60
+        LIMIT 30
     """
     try:
         df_pool = pd.read_sql(query, conn)
@@ -141,13 +150,13 @@ def get_fundamental_pool(limit=10):
     
     # 【修正处 1：个股初筛行情下载】往前推10个自然日，确保覆盖5个交易日
     start_date_stock = (datetime.datetime.now(BEIJING_TZ) - datetime.timedelta(days=10)).strftime("%Y%m%d")
-    xtdata.download_history_data2(candidate_stocks, period='1d', start_time=start_date_stock, end_time='')
-    
+    download_data(candidate_stocks, period='1d', start_time=start_date_stock, end_time='',  callback=on_progress)
     market_data = xtdata.get_market_data_ex(['close', 'amount'], candidate_stocks, period='1d', count=5)
     
     for _, row in df_pool.iterrows():
         stock = row['qmt_code']
         industry = row['industry'] if pd.notna(row['industry']) else '未知行业'
+        stock_name = row['名称'] if pd.notna(row['名称']) else '未知名称'
         
         # =======================================================
         # 【新增：检查是否在止损冷却小黑屋中】
@@ -186,6 +195,7 @@ def get_fundamental_pool(limit=10):
                 avg_amount > 20000000):  
                 final_target_pool.append({
                     'stock': stock,
+                    'stock_name': stock_name,
                     'industry': industry
                 })
                 
@@ -194,7 +204,7 @@ def get_fundamental_pool(limit=10):
             
     print(f"基础选股结果({len(final_target_pool)}只):")
     for item in final_target_pool:
-        print(f"  - {item['stock']} [{item['industry']}]")
+        print(f"  - {item['stock']} {item['stock_name']} [{item['industry']}]")
     return final_target_pool
 
 def get_tolerant_target_list(trader, account, target_num, tolerance_pool_size=10):
@@ -217,6 +227,7 @@ def get_tolerant_target_list(trader, account, target_num, tolerance_pool_size=10
     candidate_pool = get_fundamental_pool(limit=tolerance_pool_size) 
     candidate_stocks = [item['stock'] for item in candidate_pool]
     stock_to_industry = {item['stock']: item['industry'] for item in candidate_pool}
+    stock_to_name = {item['stock']: item['stock_name'] for item in candidate_pool}
 
     target_list = []
     industry_count = {}
@@ -226,13 +237,14 @@ def get_tolerant_target_list(trader, account, target_num, tolerance_pool_size=10
     for stock in current_holdings:
         if stock in candidate_stocks:
             industry = stock_to_industry[stock]
+            stock_name = stock_to_name[stock]
             # 行业风控检查（即使是老将也要接受行业集中度审查）
             if industry_count.get(industry, 0) < max_per_industry:
                 target_list.append(stock)
                 industry_count[industry] = industry_count.get(industry, 0) + 1
-                print(f"    -> [保留老将] {stock} (行业: {industry})")
+                print(f"    -> [保留老将] {stock} {stock_name} (行业: {industry})")
             else:
-                print(f"    -> [剔除老将] {stock} 所在行业 [{industry}] 已达上限，忍痛调出。")
+                print(f"    -> [剔除老将] {stock} {stock_name} 所在行业 [{industry}] 已达上限，忍痛调出。")
 
     # 4. 填补空缺：如果当前达标的老将数量不足 target_num，则从候选池中最优秀的开始递补
     for item in candidate_pool:
@@ -240,35 +252,37 @@ def get_tolerant_target_list(trader, account, target_num, tolerance_pool_size=10
             break  # 名额已满，停止递补           
         new_stock = item['stock']
         new_industry = item['industry']
+        new_stock_name = item['stock_name']
         
         # 只有当这只股票还没被加入，且它的行业还没满额时，才进行递补
         if new_stock not in target_list:
             if industry_count.get(new_industry, 0) < max_per_industry:
                 target_list.append(new_stock)
                 industry_count[new_industry] = industry_count.get(new_industry, 0) + 1
-                print(f"    -> [递补新兵] {new_stock} (行业: {new_industry})")
+                print(f"    -> [递补新兵] {new_stock} {new_stock_name} (行业: {new_industry})")
             else:
                 # 触发行业风控，直接跳过寻找下一只
                 pass
     
-    print(f"基础选股结果({len(target_list)}只):")
+    print(f"最终选股结果({len(target_list)}只):")
     for stock in target_list:
-        print(f"{item}")
-    print(target_list)
+        print(f"{stock} {stock_to_name[stock]}")
 
     return target_list
 # ================= 4. 交易与风控模块 =================
 
 def check_stop_loss(trader, account):
     """【风控】个股止盈止损与大盘趋势止损"""
+
+    print("开始【风控】个股止盈止损与大盘趋势止损...")
     positions = trader.query_stock_positions(account)
     if not positions:
         return
-        
+
     # 1. 检查大盘暴跌系统性风险
     # 【修正处 2：止损时的大盘行情下载】往前推 5 天，确保覆盖昨今 2 天
     start_date_idx = (datetime.datetime.now(BEIJING_TZ) - datetime.timedelta(days=5)).strftime("%Y%m%d")
-    xtdata.download_history_data2([Config.index_code], period='1d', start_time=start_date_idx, end_time='')
+    download_data([Config.index_code], period='1d', start_time=start_date_idx, end_time='')
     idx_df = xtdata.get_market_data_ex(['close', 'open'], [Config.index_code], period='1d', count=1)[Config.index_code]
     
     if not idx_df.empty:
@@ -364,15 +378,14 @@ def adjust_positions(trader, account, target_list):
     cash_per_stock = available_cash / len(buy_list)
     
     # 【修正处 3：买入前的新标的行情下载】往前推 5 天，确保覆盖最新 1 天
-    start_date_buy = (datetime.datetime.now(BEIJING_TZ) - datetime.timedelta(days=5)).strftime("%Y%m%d")
+    #start_date_buy = (datetime.datetime.now(BEIJING_TZ) - datetime.timedelta(days=5)).strftime("%Y%m%d")
     for code in buy_list:
-        xtdata.download_history_data2([code], period='1d', start_time=start_date_buy, end_time='')
+        #download_data([code], period='1d', start_time=start_date_buy, end_time='')
         price_df = xtdata.get_market_data_ex(['close'], [code], period='1d', count=1)
         if code in price_df and not price_df[code].empty:
             price = price_df[code]['close'].iloc[-1]
             volume = int(cash_per_stock / price / 100) * 100 # 向下取整到整百股
             if volume > 0:
-                print(f"--> [发送订单] 动作: 买入 | 代码: {code} | 数量: {volume}股 | 挂单价: {price} | 业务: rebalance_buy")
                 order_target_volume(trader, account, code, volume, price, 'rebalance_buy')
 
     print(f"调仓完毕，当前策略名下持仓: {GlobalVar.strategy_ledger.get_all()}")
@@ -427,7 +440,7 @@ def run_strategy():
     session_id = int(time.time())
     trader = XtQuantTrader(Config.mini_qmt_path, session_id)
     account = StockAccount(Config.account_id)
-    
+
     trader.register_callback(MyCallback())
     trader.start()
     trader.connect()
@@ -459,7 +472,7 @@ def run_strategy():
             check_stop_loss(trader, account)
             
             # 判断今天是不是周一 (weekday() == 0 代表周一)
-            is_rebalance_day = (now.weekday() == 0)
+            is_rebalance_day = (now.weekday() == 0) or DEBUG
             
             if now.month in Config.pass_months:
                 print(f"[{time_str}] 当前为规避月份({now.month}月)，空仓防雷，买入 ETF。")
@@ -487,11 +500,29 @@ def run_strategy():
             task_done['14:00'] = True
 
         # 防止高频死循环占用CPU
-        time.sleep(1) 
+        if DEBUG:
+            break
+        else: 
+            time.sleep(60) 
 
 
-DEBUG = False
+DEBUG = True
 if __name__ == '__main__':
+
+    parser = argparse.ArgumentParser(description="金阳光 QMT 极简模式策略启动器")
+    
+    parser.add_argument('-m', '--mode', type=str, help='运行模式: REAL 或 DEBUG')
+    
+    # 3. 解析命令行参数
+    args = parser.parse_args()
+    
+    # 4. 根据参数逻辑设置 DEBUG 状态
+    if args.mode == 'REAL':
+        print(">>> 当前处于 [REAL 实盘模式]：请注意风险！")
+        DEBUG = False
+    else:
+        print(">>> 当前处于 [DEBUG 调试模式]：仅输出日志，不触发真实报单。")
+        DEBUG = True
     run_strategy()
 
 #Todo: 自己买入的股票的黑名单，以及T+1限制导致可用资金计算错误的bug
