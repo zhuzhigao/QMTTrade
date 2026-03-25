@@ -34,7 +34,7 @@ class Config:
     base_stock_num = 4               # 基础持仓股票数量
     stoploss_limit = 0.09            # 个股止损线 9%
     stoploss_market = 0.05           # 市场大跌止损线 5%
-    stopearning_limit = 0.5           # 个股止盈线 50%
+    stopearning_limit = 0.3           # 个股止盈线 30%
     index_code = '000300.SH'         # 参考大盘指数改为沪深300
     
     # 选股过滤参数
@@ -503,7 +503,7 @@ def run_strategy():
         if DEBUG:
             break
         else: 
-            time.sleep(60) 
+            time.sleep(1) 
 
 
 DEBUG = True
