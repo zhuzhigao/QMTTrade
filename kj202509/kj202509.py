@@ -17,6 +17,7 @@ from utils.utilities import StrategyLedger
 
 
 BEIJING_TZ = timezone(timedelta(hours=8))
+DEBUG = True
 
 # ================= 1. 交易回调类 (处理订单状态反馈) =================
 class MyCallback(XtQuantTraderCallback):
@@ -38,6 +39,7 @@ class AllWeatherStrategy:
         
         # --- 参数配置 ---
         self.stock_num = 3                   # A股持仓数量
+        self.total_budget = 60000            # 策略最大使用资金（元），不足时用实际可用资金
         self.benchmark_big = '000300.SH'     # 大盘动量基准
         self.benchmark_small = '000852.SH'   # 小盘动量基准
         self.foreign_etf = ['518880.SH', '513100.SH'] # 防御外盘ETF：黄金、纳指
@@ -47,7 +49,7 @@ class AllWeatherStrategy:
         self.weekly_check_week = -1
         self.stop_loss_date = ""
         self.current_style = 'DEFENSE'
-        self.ledger = StrategyLedger(os.path.join(os.path.dirname(os.path.abspath(__file__)), 'strategy_holdings.json'))
+        self.ledger = StrategyLedger(os.path.join(os.path.dirname(os.path.abspath(__file__)), 'strategy_09_holdings.json'))
         
         # --- 核心时间节点 ---
         self.stop_loss_time = "14:45:00"     # 日内防洗盘止损时间
@@ -83,17 +85,17 @@ class AllWeatherStrategy:
             if not big_data.empty and not small_data.empty:
                 big_close = big_data['close'].T.iloc[0] # 转换取对应的 Series
                 small_close = small_data['close'].T.iloc[0]
-                
+
                 if len(big_close) >= 21 and len(small_close) >= 21:
                     # 复合平滑动量 = 50%的10日动量 + 50%的20日动量
                     big_ret_10 = (big_close.iloc[-1] / big_close.iloc[-11] - 1) * 100
                     big_ret_20 = (big_close.iloc[-1] / big_close.iloc[-21] - 1) * 100
                     small_ret_10 = (small_close.iloc[-1] / small_close.iloc[-11] - 1) * 100
                     small_ret_20 = (small_close.iloc[-1] / small_close.iloc[-21] - 1) * 100
-                    
+
                     big_momentum = 0.5 * big_ret_10 + 0.5 * big_ret_20
                     small_momentum = 0.5 * small_ret_10 + 0.5 * small_ret_20
-                    
+
                     if big_momentum < 0 and small_momentum < 0:
                         self.current_style = 'DEFENSE'
                         print(">> 动量皆负，A股泥沙俱下，切换至外盘 ETF 防御模式！")
@@ -106,8 +108,13 @@ class AllWeatherStrategy:
                         self.current_style = 'SMALL'
                         print(">> 小盘动量占优，精选高质微盘股！")
                         self.buy_a_shares('SMALL')
-            
-            self.monthly_adjusted_month = current_month
+
+                    # 只有数据充足、调仓成功执行后才锁定本月
+                    self.monthly_adjusted_month = current_month
+                else:
+                    print("!! 历史数据不足21条，本次月度调仓跳过，下次循环重试。")
+            else:
+                print("!! 基准指数数据获取为空，本次月度调仓跳过，下次循环重试。")
             
         # ---------------------------------------------------------
         # 模块 2：周度熔断观察 (每周五 14:30)
@@ -187,8 +194,8 @@ class AllWeatherStrategy:
                         )
                     self.ledger.remove(pos.stock_code)
         
-        # 等待2秒，确保清仓订单成交、资金释放回账户
-        time.sleep(2)
+        # 等待20秒，确保清仓订单成交、资金释放回账户
+        time.sleep(20)
         
         # 2. 获取最新可用资金
         asset = self.trader.query_stock_asset(self.account)
@@ -197,11 +204,12 @@ class AllWeatherStrategy:
             return
             
         available_cash = asset.cash
-        print(f">> 当前账户可用资金: {available_cash:.2f}")
-        
+        budget = min(available_cash, self.total_budget)
+        print(f">> 当前账户可用资金: {available_cash:.2f}，本次使用预算: {budget:.2f}")
+
         # 3. 计算并等权买入 ETF
-        if available_cash > 1000: # 留存少许底仓防止滑点导致废单
-            target_value_per_etf = available_cash / len(self.foreign_etf)
+        if budget > 1000: # 留存少许底仓防止滑点导致废单
+            target_value_per_etf = budget / len(self.foreign_etf)
             for etf in self.foreign_etf:
                 # 订阅并获取最新 Tick 现价
                 xtdata.subscribe_quote(etf, period='tick', count=1)
@@ -263,8 +271,9 @@ class AllWeatherStrategy:
         hold_codes = []
         if positions:
             for pos in positions:
-                hold_codes.append(pos.stock_code)
-                if self.ledger.is_in_ledger(pos.stock_code) and pos.stock_code not in target_list and pos.can_use_volume > 0 :
+                if self.ledger.is_in_ledger(pos.stock_code):
+                    hold_codes.append(pos.stock_code)  # 只记录本策略持有的股票
+                if self.ledger.is_in_ledger(pos.stock_code) and pos.stock_code not in target_list and pos.can_use_volume > 0:
                     if not DEBUG:
                         self.trader.order_stock_async(
                             self.account, pos.stock_code, xtconstant.STOCK_SELL,
@@ -278,12 +287,13 @@ class AllWeatherStrategy:
         asset = self.trader.query_stock_asset(self.account)
         if asset:
             available_cash = asset.cash
+            budget = min(available_cash, self.total_budget)
             # 只买入当前没持有的目标股
             buy_targets = [code for code in target_list if code not in hold_codes]
-            
-            if buy_targets and available_cash > 2000:
+
+            if buy_targets and budget > 2000:
                 # 预留 2% 资金作为手续费和滑点缓冲
-                safe_cash = available_cash * 0.98
+                safe_cash = budget * 0.98
                 cash_per_stock = safe_cash / len(buy_targets)
                 
                 for code in buy_targets:
@@ -365,8 +375,6 @@ class AllWeatherStrategy:
             print(f">> 基本面数据处理出错: {e}，返回默认前3只。")
             return pool[:self.stock_num]
 
-
-DEBUG = True
 
 # ================= 3. 主函数执行入口 (Main) =================
 if __name__ == '__main__':
