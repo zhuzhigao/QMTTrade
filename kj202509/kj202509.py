@@ -1,4 +1,6 @@
 # coding=utf-8
+import sys
+import os
 import time
 import datetime
 import pandas as pd
@@ -7,6 +9,11 @@ from xtquant.xttrader import XtQuantTrader, XtQuantTraderCallback
 from xtquant.xttype import StockAccount
 from xtquant import xtconstant
 from datetime import timezone, timedelta
+
+parent_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+if parent_dir not in sys.path:
+    sys.path.append(parent_dir)
+from utils.utilities import StrategyLedger
 
 
 BEIJING_TZ = timezone(timedelta(hours=8))
@@ -36,10 +43,11 @@ class AllWeatherStrategy:
         self.foreign_etf = ['518880.SH', '513100.SH'] # 防御外盘ETF：黄金、纳指
         
         # --- 状态记录 ---
-        self.monthly_adjusted_month = -1     
-        self.weekly_check_week = -1          
-        self.stop_loss_date = ""             
-        self.current_style = 'DEFENSE'       
+        self.monthly_adjusted_month = -1
+        self.weekly_check_week = -1
+        self.stop_loss_date = ""
+        self.current_style = 'DEFENSE'
+        self.ledger = StrategyLedger(os.path.join(os.path.dirname(os.path.abspath(__file__)), 'strategy_holdings.json'))
         
         # --- 核心时间节点 ---
         self.stop_loss_time = "14:45:00"     # 日内防洗盘止损时间
@@ -136,23 +144,27 @@ class AllWeatherStrategy:
                     stock = pos.stock_code
                     cost_price = pos.open_price
                     volume = pos.volume
-                    
+
+                    if not self.ledger.is_in_ledger(stock):
+                        continue  # 只处理本策略买入的持仓
+
                     if volume > 0 and pos.can_use_volume > 0: # 确保有可用持仓
                         # 订阅并获取 Tick 现价
                         xtdata.subscribe_quote(stock, period='tick', count=1)
                         tick = xtdata.get_full_tick([stock])
                         if stock in tick:
                             current_price = tick[stock]['lastPrice']
-                            
+
                             # 触发 8% 止损
                             if current_price < cost_price * 0.92:
                                 print(f"!! 止损触发 !! [{stock}] 现价 {current_price} 跌破成本 {cost_price} 达 8%")
                                 # 异步市价清仓
                                 if not DEBUG:
                                     self.trader.order_stock_async(
-                                        self.account, stock, xtconstant.STOCK_SELL, 
+                                        self.account, stock, xtconstant.STOCK_SELL,
                                         pos.can_use_volume, xtconstant.LATEST_PRICE, 0, 'strategy_stop_loss', '止损卖出'
                                     )
+                                self.ledger.remove(stock)
                                 print(">> 提示：止损后腾出资金空仓保留，不向下摊平。")
                                 
             self.stop_loss_date = current_date
@@ -163,16 +175,17 @@ class AllWeatherStrategy:
         """核心业务 1：清仓A股，等权买入外盘ETF避险"""
         print(f">> 开始执行防御模式：清仓A股，准备买入 ETF {self.foreign_etf}")
         
-        # 1. 卖出所有非当前目标 ETF 的持仓
+        # 1. 卖出本策略持有的、非目标 ETF 的持仓
         positions = self.trader.query_stock_positions(self.account)
         if positions:
             for pos in positions:
-                if pos.can_use_volume > 0 and pos.stock_code not in self.foreign_etf:
+                if pos.can_use_volume > 0 and pos.stock_code not in self.foreign_etf and self.ledger.is_in_ledger(pos.stock_code):
                     if not DEBUG:
                         self.trader.order_stock_async(
-                            self.account, pos.stock_code, xtconstant.STOCK_SELL, 
+                            self.account, pos.stock_code, xtconstant.STOCK_SELL,
                             pos.can_use_volume, xtconstant.LATEST_PRICE, 0, 'strategy_clear', '清仓避险'
                         )
+                    self.ledger.remove(pos.stock_code)
         
         # 等待2秒，确保清仓订单成交、资金释放回账户
         time.sleep(2)
@@ -201,9 +214,10 @@ class AllWeatherStrategy:
                         if volume >= 100:
                             if not DEBUG:
                                 self.trader.order_stock_async(
-                                    self.account, etf, xtconstant.STOCK_BUY, 
+                                    self.account, etf, xtconstant.STOCK_BUY,
                                     volume, xtconstant.LATEST_PRICE, 0, 'strategy_buy_etf', '买入外盘ETF'
                                 )
+                            self.ledger.add(etf)
                             print(f">> 发送委托: 买入 {etf}, 数量: {volume}股, 预估耗资: {volume*price:.2f}")
 
 
@@ -250,14 +264,15 @@ class AllWeatherStrategy:
         if positions:
             for pos in positions:
                 hold_codes.append(pos.stock_code)
-                if pos.stock_code not in target_list and pos.can_use_volume > 0:
+                if self.ledger.is_in_ledger(pos.stock_code) and pos.stock_code not in target_list and pos.can_use_volume > 0 :
                     if not DEBUG:
                         self.trader.order_stock_async(
-                            self.account, pos.stock_code, xtconstant.STOCK_SELL, 
+                            self.account, pos.stock_code, xtconstant.STOCK_SELL,
                             pos.can_use_volume, xtconstant.LATEST_PRICE, 0, 'strategy_sell_a', '不符风格卖出'
                         )
+                    self.ledger.remove(pos.stock_code)
 
-        time.sleep(2) # 等待平仓资金释放
+        time.sleep(20) # 等待平仓资金释放
         
         # 4.2 计算现金并买入新目标
         asset = self.trader.query_stock_asset(self.account)
@@ -281,9 +296,10 @@ class AllWeatherStrategy:
                             if volume >= 100:
                                 if not DEBUG:
                                     self.trader.order_stock_async(
-                                        self.account, code, xtconstant.STOCK_BUY, 
+                                        self.account, code, xtconstant.STOCK_BUY,
                                         volume, xtconstant.LATEST_PRICE, 0, 'strategy_buy_a', f'建仓{style}'
                                     )
+                                self.ledger.add(code)
                                 print(f">> 发送委托: 买入 {code}, 数量: {volume}股, 预估耗资: {volume*price:.2f}")
 
 

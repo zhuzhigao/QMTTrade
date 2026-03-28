@@ -101,6 +101,10 @@ class StrategyLedger:
             self.holdings.remove(stock_code)
             self.save_ledger()
             
+    def is_in_ledger(self, stock_code):
+        """检查某只股票是否在本策略账本中"""
+        return stock_code in self.holdings
+
     def get_all(self):
         """获取当前策略名下的所有股票"""
         return self.holdings
