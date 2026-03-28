@@ -458,7 +458,7 @@ def run_strategy():
         if time_str == "00:00":
             for k in task_done.keys(): task_done[k] = False
             GlobalVar.market_crash = False
-            time.sleep(60)
+            time.sleep(1)
 
         # 09:05 盘前准备：测算大盘趋势并更新仓位数量
         if DEBUG or (time_str == "09:05" and not task_done['09:05']):

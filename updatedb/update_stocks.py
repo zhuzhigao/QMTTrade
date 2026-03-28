@@ -280,14 +280,14 @@ if __name__ == '__main__':
     print("====== 宽客本地全量因子数据库更新程序启动 (实盘重试版) ======")
     print("="*60)
     
-    # update_dividend_data_to_db()
-    # time.sleep(3) # 模块间休眠
+    update_dividend_data_to_db()
+    time.sleep(3) # 模块间休眠
     
-    # update_financial_report_to_db()
-    # time.sleep(3) # 模块间休眠
+    update_financial_report_to_db()
+    time.sleep(3) # 模块间休眠
 
-    #update_industry_data_to_db()
+    update_industry_data_to_db()
     
-    #update_audit_report_to_db()
+    update_audit_report_to_db()
     
     print("\n🎉 所有数据更新程序执行完毕！")
