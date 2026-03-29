@@ -30,6 +30,7 @@ if parent_dir not in sys.path:
 from utils.utilities import MessagePusher
 
 BEIJING_TZ = timezone(timedelta(hours=8))
+DEBUG = False
 
 class XtStockAccount:
     """
@@ -141,14 +142,20 @@ def get_rsrs_signal():
     highs = data['high'].values
     lows = data['low'].values
     
+    if len(highs) < Config.rsrs_n + 2:
+        raise ValueError(f"RSRS 数据不足：需要至少 {Config.rsrs_n + 2} 条，实际获取 {len(highs)} 条，请检查数据下载。")
+
     slopes = []
     for i in range(len(highs) - Config.rsrs_n + 1):
         y = highs[i : i + Config.rsrs_n]
         x = lows[i : i + Config.rsrs_n]
         slope, _, _, _, _ = stats.linregress(x, y)
         slopes.append(slope)
-    
-    # 标准化
+
+    # 标准化（至少需要2个slope：1个当前 + 1个历史）
+    if len(slopes) < 2:
+        raise ValueError(f"RSRS slopes 数量不足以标准化：{len(slopes)} 个，请增大 rsrs_m 或检查数据。")
+
     current_slope = slopes[-1]
     history_slopes = slopes[:-1]
     z_score = (current_slope - np.mean(history_slopes)) / np.std(history_slopes)
@@ -204,12 +211,7 @@ def filter_audit_opinion(pool):
         return etfs
 
 def get_momentum_score(code):
-    """计算动量平稳度评分: Return * R2"""
-        # 获取历史数据
-    start_date = (datetime.datetime.now(BEIJING_TZ) - datetime.timedelta(days=Config.rsrs_m + Config.rsrs_n)).strftime("%Y%m%d")
-    xtdata.download_history_data(code, period='1d', start_time=start_date, end_time='')
-    xtdata.download_history_data(code, period='1m', start_time=datetime.datetime.now(BEIJING_TZ).strftime("%Y%m%d"), end_time='')
-
+    """计算动量平稳度评分: Return * R2（历史数据由调用方批量预下载）"""
     data = xtdata.get_market_data_ex(['close'], [code], period='1d', count=Config.rank_days)[code]
     prices = data['close'].values
     if len(prices) < Config.rank_days: return -999
@@ -261,8 +263,14 @@ class RobotTrader:
                 print(f"信号: 进攻 | 今日非周一调仓日，动量不变，保持当前持仓装死。")
                 return # 不是周一，直接退出函数，不进行换仓
             
+            # 批量预下载所有ETF历史数据，避免在循环内逐只下载
+            start_date = (datetime.datetime.now(BEIJING_TZ) - datetime.timedelta(days=Config.rsrs_m + Config.rsrs_n)).strftime("%Y%m%d")
+            today_str_dl = datetime.datetime.now(BEIJING_TZ).strftime("%Y%m%d")
+            xtdata.download_history_data2(safe_pool, period='1d', start_time=start_date, end_time='')
+            xtdata.download_history_data2(safe_pool, period='1m', start_time=today_str_dl, end_time='')
+
             scores = []
-            
+
             print("\n>>> 资产池动量评分明细表:")
             print(f"{'代码':<10} | {'名称':<12} | {'动量得分':<10}")
             
@@ -306,36 +314,35 @@ class RobotTrader:
         positions = self.trader.query_stock_positions(self.acc)
         
         # 👇👇👇 修改：不仅要求 volume > 0，还要求代码必须在白名单里 👇👇👇
+        # 用 volume > 0 识别持仓（含今日买入），用 can_use_volume 作为可卖数量
         current_holdings = {
-            p.stock_code: p.volume 
-            for p in positions 
+            p.stock_code: p.can_use_volume
+            for p in positions
             if p.volume > 0 and p.stock_code in Config.all_symbols
         }
         
-        # 获取资产总额
-        asset = self.trader.query_stock_asset(self.acc)
-        total_asset = min(asset.total_asset, Config.policy_asset)
-        print(f"账户总资产: {asset.total_asset:.2f} | 本策略实际分配额度: {total_asset:.2f}")
-
         buy_records = []
         sell_records = []
-        
+
         today_str = datetime.datetime.now(BEIJING_TZ).strftime("%Y%m%d")
         # ================= A. 卖出不再目标的标的 =================
         for code in current_holdings.keys():
             if code not in target_list:
-                # 获取实际该卖的股数
+                # 获取实际可卖数量（T+1限制，当日买入的 can_use_volume 为0）
                 sell_vol = current_holdings[code]
+                if sell_vol <= 0:
+                    print(f"  -> {code} 今日买入，暂不可卖，跳过")
+                    continue
                 name = Config.symbol_to_name.get(code, code)
-                remark = f"Sell_{name}_{today_str}"                
+                remark = f"Sell_{name}_{today_str}"
                 try:
                     # 瞬间拉取最新盘口价
                     tick = xtdata.get_full_tick([code])
                     if code in tick and tick[code]['lastPrice'] > 0:
                         current_price = tick[code]['lastPrice']
                         print(f"【准备卖出】{code} | 单价: {current_price} | 数量: {sell_vol}股 | 逻辑: 调出目标池")
-                        
-                        # 发送真实的卖出委托 (24代表卖出，或者用 xtconstant.STOCK_SELL)
+
+                        # 发送真实的卖出委托
                         if not DEBUG:
                             seq = self.trader.order_stock(self.acc, code, xtconstant.STOCK_SELL, sell_vol, xtconstant.FIX_PRICE, current_price, "36_Strategy_Sell", remark)
                             if (seq != -1):
@@ -345,6 +352,13 @@ class RobotTrader:
                         print(f"  -> 获取 {code} 最新价失败，跳过卖出")
                 except Exception as e:
                     print(f"  -> {code} 卖出订单报错: {e}")
+
+        time.sleep(20) # 等待卖出订单成交、资金释放
+
+        # 卖出结算后再查资产，确保可用资金已更新
+        asset = self.trader.query_stock_asset(self.acc)
+        total_asset = min(asset.total_asset, Config.policy_asset)
+        print(f"账户总资产: {asset.total_asset:.2f} | 本策略实际分配额度: {total_asset:.2f}")
 
         # B. 买入目标 (按总资产比例)
         weight = 1.0 / len(target_list)
@@ -388,20 +402,21 @@ class RobotTrader:
 
     def loop(self):
         print(f">>> 交易机器人已启动 (当前北京时间: {datetime.datetime.now(BEIJING_TZ).strftime('%H:%M:%S')})")
+        last_run_date = ""
         while True:
-            now_bj = datetime.datetime.now(BEIJING_TZ).strftime('%H:%M:%S')
-            #print(now_bj)
-            if DEBUG or now_bj == Config.check_time:
+            now_dt = datetime.datetime.now(BEIJING_TZ)
+            now_time = now_dt.strftime('%H:%M:%S')
+            today = now_dt.strftime('%Y%m%d')
+            if DEBUG or (now_time >= Config.check_time and last_run_date != today):
                 try:
                     self.execute_logic()
                 except Exception as e:
                     print(f"运行时发生错误: {e}")
-                time.sleep(2) # 避开同一秒多次触发
+                last_run_date = today
             if DEBUG:
                 break
             time.sleep(1)
     
-DEBUG = False              
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="金阳光 QMT 极简模式策略36 启动器")
     
