@@ -135,7 +135,6 @@ def get_fundamental_pool(limit=10):
         df_pool = pd.read_sql(query, conn)
     except Exception as e:
         print(f"读取数据库失败: {e}")
-        conn.close()
         return []
     finally:
         conn.close()
@@ -279,17 +278,18 @@ def check_stop_loss(trader, account):
     if not positions:
         return
 
-    # 1. 检查大盘暴跌系统性风险
-    # 【修正处 2：止损时的大盘行情下载】往前推 5 天，确保覆盖昨今 2 天
-    start_date_idx = (datetime.datetime.now(BEIJING_TZ) - datetime.timedelta(days=5)).strftime("%Y%m%d")
-    download_data([Config.index_code], period='1d', start_time=start_date_idx, end_time='')
-    idx_df = xtdata.get_market_data_ex(['close', 'open'], [Config.index_code], period='1d', count=1)[Config.index_code]
-    
-    if not idx_df.empty:
-        down_ratio = (idx_df['close'].iloc[-1] / idx_df['open'].iloc[-1]) - 1
-        if down_ratio <= -Config.stoploss_market:
-            print(f"大盘跌幅 {down_ratio:.2%} 触发止损!")
-            GlobalVar.market_crash = True
+    # 1. 检查大盘暴跌系统性风险（使用 get_full_tick 获取今日实时盘中涨跌，避免读到昨日已收盘的日线数据）
+    tick_data = xtdata.get_full_tick([Config.index_code])
+    if Config.index_code in tick_data:
+        tick = tick_data[Config.index_code]
+        day_open = tick['open']
+        current_price = tick['lastPrice']
+        if day_open and day_open > 0:
+            down_ratio = (current_price / day_open) - 1
+            print(f"大盘今日盘中涨跌幅: {down_ratio:.2%} (开盘价: {day_open}, 当前价: {current_price})")
+            if down_ratio <= -Config.stoploss_market:
+                print(f"大盘跌幅 {down_ratio:.2%} 触发止损!")
+                GlobalVar.market_crash = True
 
     strategy_stocks = GlobalVar.strategy_ledger.get_all()
     
@@ -303,7 +303,8 @@ def check_stop_loss(trader, account):
         current_price = pos.market_value / pos.volume if pos.volume > 0 else 0
         
         if GlobalVar.market_crash:
-            order_target_volume(trader, account, pos.stock_code, 0, current_price, 'market_crash_sell')
+            if order_target_volume(trader, account, pos.stock_code, 0, current_price, 'market_crash_sell'):
+                GlobalVar.blacklist_mgr.add(pos.stock_code)
             continue
             
         if current_price >= cost * (1+Config.stopearning_limit):
@@ -312,9 +313,6 @@ def check_stop_loss(trader, account):
             
         elif current_price < cost * (1 - Config.stoploss_limit):
             print(f"[{pos.stock_code}] 跌幅超9%触发止损，关进 30 天小黑屋！")
-            # 原有的加入黑名单逻辑（记录当天的日期）
-            today_str = datetime.datetime.now(BEIJING_TZ).strftime("%Y-%m-%d")
-            # 【新增这一行】：立刻把更新后的小黑屋写进硬盘！
             if order_target_volume(trader, account, pos.stock_code, 0, current_price, 'stop_loss'):
                 GlobalVar.blacklist_mgr.add(pos.stock_code)
 
@@ -378,9 +376,9 @@ def adjust_positions(trader, account, target_list):
     cash_per_stock = available_cash / len(buy_list)
     
     # 【修正处 3：买入前的新标的行情下载】往前推 5 天，确保覆盖最新 1 天
-    #start_date_buy = (datetime.datetime.now(BEIJING_TZ) - datetime.timedelta(days=5)).strftime("%Y%m%d")
+    start_date_buy = (datetime.datetime.now(BEIJING_TZ) - datetime.timedelta(days=5)).strftime("%Y%m%d")
     for code in buy_list:
-        #download_data([code], period='1d', start_time=start_date_buy, end_time='')
+        download_data([code], period='1d', start_time=start_date_buy, end_time='')
         price_df = xtdata.get_market_data_ex(['close'], [code], period='1d', count=1)
         if code in price_df and not price_df[code].empty:
             price = price_df[code]['close'].iloc[-1]
