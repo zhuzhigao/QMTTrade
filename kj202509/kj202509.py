@@ -1,6 +1,7 @@
 # coding=utf-8
 import sys
 import os
+import json
 import time
 import datetime
 import pandas as pd
@@ -45,10 +46,12 @@ class AllWeatherStrategy:
         self.foreign_etf = ['518880.SH', '513100.SH'] # 防御外盘ETF：黄金、纳指
         
         # --- 状态记录 ---
+        self._state_file = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'strategy_09_state.json')
         self.monthly_adjusted_month = -1
         self.weekly_check_week = -1
         self.stop_loss_date = ""
         self.current_style = 'DEFENSE'
+        self._load_state()
         self.ledger = StrategyLedger(os.path.join(os.path.dirname(os.path.abspath(__file__)), 'strategy_09_holdings.json'))
         
         # --- 核心时间节点 ---
@@ -56,6 +59,34 @@ class AllWeatherStrategy:
         self.circuit_breaker_time = "14:30:00" # 周五防暴跌熔断时间
         
         print(">> 策略初始化完成，等待行情与时间触发...")
+
+    def _load_state(self):
+        """从磁盘恢复策略运行状态，避免重启后重复执行已完成的操作"""
+        if os.path.exists(self._state_file):
+            try:
+                with open(self._state_file, 'r', encoding='utf-8') as f:
+                    s = json.load(f)
+                self.monthly_adjusted_month = s.get('monthly_adjusted_month', -1)
+                self.weekly_check_week = s.get('weekly_check_week', -1)
+                self.stop_loss_date = s.get('stop_loss_date', "")
+                self.current_style = s.get('current_style', 'DEFENSE')
+                print(f">> 已从磁盘恢复策略状态: 风格={self.current_style}, 上次调仓月={self.monthly_adjusted_month}, 止损日={self.stop_loss_date}")
+            except Exception as e:
+                print(f">> 读取状态文件失败: {e}，使用默认初始状态。")
+
+    def _save_state(self):
+        """将当前策略运行状态持久化到磁盘"""
+        s = {
+            'monthly_adjusted_month': self.monthly_adjusted_month,
+            'weekly_check_week': self.weekly_check_week,
+            'stop_loss_date': self.stop_loss_date,
+            'current_style': self.current_style,
+        }
+        try:
+            with open(self._state_file, 'w', encoding='utf-8') as f:
+                json.dump(s, f, ensure_ascii=False, indent=4)
+        except Exception as e:
+            print(f">> 保存状态文件失败: {e}")
 
     def handlebar(self):
         """核心驱动函数，在主循环中被每秒调用一次"""
@@ -98,19 +129,23 @@ class AllWeatherStrategy:
 
                     if big_momentum < 0 and small_momentum < 0:
                         self.current_style = 'DEFENSE'
+                        self._save_state()
                         print(">> 动量皆负，A股泥沙俱下，切换至外盘 ETF 防御模式！")
                         self.buy_defense_etf()
                     elif big_momentum >= small_momentum:
                         self.current_style = 'BIG'
+                        self._save_state()
                         print(">> 大盘动量占优，精选大盘白马股！")
                         self.buy_a_shares('BIG')
                     else:
                         self.current_style = 'SMALL'
+                        self._save_state()
                         print(">> 小盘动量占优，精选高质微盘股！")
                         self.buy_a_shares('SMALL')
 
                     # 只有数据充足、调仓成功执行后才锁定本月
                     self.monthly_adjusted_month = current_month
+                    self._save_state()
                 else:
                     print("!! 历史数据不足21条，本次月度调仓跳过，下次循环重试。")
             else:
@@ -136,9 +171,11 @@ class AllWeatherStrategy:
                     if current_price < ma20 and self.current_style != 'DEFENSE':
                         print(f"!! 警报：{benchmark} 跌破20日均线，触发周度熔断，提前防御 !!")
                         self.current_style = 'DEFENSE'
+                        self._save_state()
                         self.buy_defense_etf()
                         
                 self.weekly_check_week = current_week
+                self._save_state()
 
         # ---------------------------------------------------------
         # 模块 3：日内硬止损 (每日 14:45 执行)
@@ -175,6 +212,7 @@ class AllWeatherStrategy:
                                 print(">> 提示：止损后腾出资金空仓保留，不向下摊平。")
                                 
             self.stop_loss_date = current_date
+            self._save_state()
 
 
 # ================= 业务辅助方法 =================
