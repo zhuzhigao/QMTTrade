@@ -1,7 +1,6 @@
 # coding=utf-8
 import sys
 import os
-import json
 import time
 import datetime
 import pandas as pd
@@ -14,7 +13,7 @@ from datetime import timezone, timedelta
 parent_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 if parent_dir not in sys.path:
     sys.path.append(parent_dir)
-from utils.utilities import StrategyLedger
+from utils.utilities import StrategyLedger, StateManager
 
 
 BEIJING_TZ = timezone(timedelta(hours=8))
@@ -46,13 +45,17 @@ class AllWeatherStrategy:
         self.foreign_etf = ['518880.SH', '513100.SH'] # 防御外盘ETF：黄金、纳指
         
         # --- 状态记录 ---
-        self._state_file = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'strategy_09_state.json')
-        self.monthly_adjusted_month = -1
-        self.weekly_check_week = -1
-        self.stop_loss_date = ""
-        self.current_style = 'DEFENSE'
-        self._load_state()
-        self.ledger = StrategyLedger(os.path.join(os.path.dirname(os.path.abspath(__file__)), 'strategy_09_holdings.json'))
+        _base = os.path.dirname(os.path.abspath(__file__))
+        self.state = StateManager(
+            os.path.join(_base, 'strategy_09_state.json'),
+            defaults={
+                'monthly_adjusted_month': -1,
+                'weekly_check_week': -1,
+                'stop_loss_date': "",
+                'current_style': 'DEFENSE',
+            }
+        )
+        self.ledger = StrategyLedger(os.path.join(_base, 'strategy_09_holdings.json'))
         
         # --- 核心时间节点 ---
         self.stop_loss_time = "14:45:00"     # 日内防洗盘止损时间
@@ -60,33 +63,38 @@ class AllWeatherStrategy:
         
         print(">> 策略初始化完成，等待行情与时间触发...")
 
-    def _load_state(self):
-        """从磁盘恢复策略运行状态，避免重启后重复执行已完成的操作"""
-        if os.path.exists(self._state_file):
-            try:
-                with open(self._state_file, 'r', encoding='utf-8') as f:
-                    s = json.load(f)
-                self.monthly_adjusted_month = s.get('monthly_adjusted_month', -1)
-                self.weekly_check_week = s.get('weekly_check_week', -1)
-                self.stop_loss_date = s.get('stop_loss_date', "")
-                self.current_style = s.get('current_style', 'DEFENSE')
-                print(f">> 已从磁盘恢复策略状态: 风格={self.current_style}, 上次调仓月={self.monthly_adjusted_month}, 止损日={self.stop_loss_date}")
-            except Exception as e:
-                print(f">> 读取状态文件失败: {e}，使用默认初始状态。")
+    # --- 类型化状态属性，读写自动持久化 ---
+    @property
+    def monthly_adjusted_month(self) -> int:
+        return self.state.get('monthly_adjusted_month')
 
-    def _save_state(self):
-        """将当前策略运行状态持久化到磁盘"""
-        s = {
-            'monthly_adjusted_month': self.monthly_adjusted_month,
-            'weekly_check_week': self.weekly_check_week,
-            'stop_loss_date': self.stop_loss_date,
-            'current_style': self.current_style,
-        }
-        try:
-            with open(self._state_file, 'w', encoding='utf-8') as f:
-                json.dump(s, f, ensure_ascii=False, indent=4)
-        except Exception as e:
-            print(f">> 保存状态文件失败: {e}")
+    @monthly_adjusted_month.setter
+    def monthly_adjusted_month(self, value: int):
+        self.state.set('monthly_adjusted_month', value)
+
+    @property
+    def weekly_check_week(self) -> int:
+        return self.state.get('weekly_check_week')
+
+    @weekly_check_week.setter
+    def weekly_check_week(self, value: int):
+        self.state.set('weekly_check_week', value)
+
+    @property
+    def stop_loss_date(self) -> str:
+        return self.state.get('stop_loss_date')
+
+    @stop_loss_date.setter
+    def stop_loss_date(self, value: str):
+        self.state.set('stop_loss_date', value)
+
+    @property
+    def current_style(self) -> str:
+        return self.state.get('current_style')
+
+    @current_style.setter
+    def current_style(self, value: str):
+        self.state.set('current_style', value)
 
     def handlebar(self):
         """核心驱动函数，在主循环中被每秒调用一次"""
@@ -95,7 +103,7 @@ class AllWeatherStrategy:
         current_date = now.strftime("%Y%m%d")
         current_month = now.month
         current_week = now.isocalendar()[1]
-        
+
         # 必须在交易时间段内才执行业务逻辑
         if not ("09:30:00" <= current_time <= "15:00:00"):
             return
@@ -105,13 +113,13 @@ class AllWeatherStrategy:
         # ---------------------------------------------------------
         if current_time >= "09:35:00" and self.monthly_adjusted_month != current_month:
             print(f"[{current_time}] 执行月度动量研判与调仓...")
-            
+
             # 下载并获取近21天日线数据
             start_date = (datetime.datetime.now(BEIJING_TZ) - datetime.timedelta(days=30)).strftime("%Y%m%d")
             xtdata.download_history_data2([self.benchmark_big, self.benchmark_small], period='1d', start_time=start_date, end_time='', )
             big_data = xtdata.get_market_data(['close'], [self.benchmark_big], '1d', count=21, dividend_type='front')
-            small_data = xtdata.get_market_data(['close'], [self.benchmark_small], '1d', count=21,dividend_type='front')
-            
+            small_data = xtdata.get_market_data(['close'], [self.benchmark_small], '1d', count=21, dividend_type='front')
+
             # xtdata 返回格式处理
             if not big_data.empty and not small_data.empty:
                 big_close = big_data['close'].T.iloc[0] # 转换取对应的 Series
@@ -129,28 +137,24 @@ class AllWeatherStrategy:
 
                     if big_momentum < 0 and small_momentum < 0:
                         self.current_style = 'DEFENSE'
-                        self._save_state()
                         print(">> 动量皆负，A股泥沙俱下，切换至外盘 ETF 防御模式！")
                         self.buy_defense_etf()
                     elif big_momentum >= small_momentum:
                         self.current_style = 'BIG'
-                        self._save_state()
                         print(">> 大盘动量占优，精选大盘白马股！")
                         self.buy_a_shares('BIG')
                     else:
                         self.current_style = 'SMALL'
-                        self._save_state()
                         print(">> 小盘动量占优，精选高质微盘股！")
                         self.buy_a_shares('SMALL')
 
                     # 只有数据充足、调仓成功执行后才锁定本月
                     self.monthly_adjusted_month = current_month
-                    self._save_state()
                 else:
                     print("!! 历史数据不足21条，本次月度调仓跳过，下次循环重试。")
             else:
                 print("!! 基准指数数据获取为空，本次月度调仓跳过，下次循环重试。")
-            
+
         # ---------------------------------------------------------
         # 模块 2：周度熔断观察 (每周五 14:30)
         # ---------------------------------------------------------
@@ -158,24 +162,22 @@ class AllWeatherStrategy:
             if now.weekday() == 4: # 4 代表周五
                 print(f"[{current_time}] 执行周度熔断审查...")
                 benchmark = self.benchmark_big if self.current_style == 'BIG' else self.benchmark_small
-                
+
                 start_date = (datetime.datetime.now(BEIJING_TZ) - datetime.timedelta(days=30)).strftime("%Y%m%d")
                 xtdata.download_history_data2([self.benchmark_big, self.benchmark_small], period='1d', start_time=start_date, end_time='', )
                 b_data = xtdata.get_market_data(['close'], [benchmark], '1d', count=20, dividend_type='front')
-                
+
                 if not b_data.empty:
                     closes = b_data['close'].T.iloc[0]
                     ma20 = closes.mean()
                     current_price = closes.iloc[-1]
-                    
+
                     if current_price < ma20 and self.current_style != 'DEFENSE':
                         print(f"!! 警报：{benchmark} 跌破20日均线，触发周度熔断，提前防御 !!")
                         self.current_style = 'DEFENSE'
-                        self._save_state()
                         self.buy_defense_etf()
-                        
-                self.weekly_check_week = current_week
-                self._save_state()
+
+            self.weekly_check_week = current_week
 
         # ---------------------------------------------------------
         # 模块 3：日内硬止损 (每日 14:45 执行)
@@ -210,9 +212,8 @@ class AllWeatherStrategy:
                                     )
                                 self.ledger.remove(stock)
                                 print(">> 提示：止损后腾出资金空仓保留，不向下摊平。")
-                                
+
             self.stop_loss_date = current_date
-            self._save_state()
 
 
 # ================= 业务辅助方法 =================

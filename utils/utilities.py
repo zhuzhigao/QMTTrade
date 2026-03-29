@@ -4,9 +4,51 @@ import datetime
 import requests
 from datetime import timezone, timedelta
 
-__all__ = ['StrategyLedger', 'BlacklistManager', 'MessagePusher']
+__all__ = ['StrategyLedger', 'BlacklistManager', 'MessagePusher', 'StateManager']
 
 BEIJING_TZ = timezone(timedelta(hours=8))
+
+class StateManager:
+    """
+    策略状态持久化管理器。
+    像操作普通变量一样读写状态，每次 set() 自动将全量状态序列化到磁盘。
+    用法：
+        state = StateManager('state.json', defaults={'style': 'DEFENSE', 'month': -1})
+        state.set('style', 'BIG')       # 立即持久化
+        style = state.get('style')      # 读取
+    """
+    def __init__(self, filepath, defaults=None):
+        self.filepath = filepath
+        self._data = dict(defaults) if defaults else {}
+        self._load()
+
+    def _load(self):
+        if os.path.exists(self.filepath):
+            try:
+                with open(self.filepath, 'r', encoding='utf-8') as f:
+                    saved = json.load(f)
+                self._data.update(saved)
+                print(f"--> 已从磁盘恢复状态 ({self.filepath}): {self._data}")
+            except Exception as e:
+                print(f"--> 读取状态文件失败: {e}，使用默认初始状态。")
+
+    def _save(self):
+        try:
+            with open(self.filepath, 'w', encoding='utf-8') as f:
+                json.dump(self._data, f, ensure_ascii=False, indent=4)
+        except Exception as e:
+            print(f"--> 保存状态文件失败: {e}")
+
+    def get(self, key, default=None):
+        return self._data.get(key, default)
+
+    def set(self, key, value):
+        self._data[key] = value
+        self._save()
+
+    def get_all(self):
+        return dict(self._data)
+
 
 class BlacklistManager:
     """小黑屋（黑名单）管理类，用于记录被止损的股票，防止近期被重复买入"""
