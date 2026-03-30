@@ -283,6 +283,8 @@ def check_stop_loss(trader, account):
     if Config.index_code in tick_data:
         tick = tick_data[Config.index_code]
         day_open = tick['open']
+        if day_open <= 0:
+            day_open = tick['lastPrice']
         current_price = tick['lastPrice']
         if day_open and day_open > 0:
             down_ratio = (current_price / day_open) - 1

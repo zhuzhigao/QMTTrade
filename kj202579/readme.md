@@ -91,4 +91,4 @@
 * **用户画像**：追求稳健收益、低换手率，希望将量化作为资产配置一部分的投资者。
 
 ---
-**注意**：运行前请确保本地 `utils/utilities.py` 中的 `StrategyLedger` 与 `BlacklistManager` 类已正确初始化。
+**注意**：运行前请确保本地 `utils/utilities.py` 中的 `StrategyLedger` 与 `BlacklistManager` 类已正确初始化。 
