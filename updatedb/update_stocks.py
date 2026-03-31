@@ -273,7 +273,9 @@ def update_audit_report_to_db(csv_path='audit_report.csv'):
     except Exception as e:
         print(f"❌ 更新审计意见表失败: {e}")
         return False
-    
+
+#Todo: Download XtQuant Historical data, finance data and index weight data.
+
 # ================= 3. 执行主入口 =================
 if __name__ == '__main__':
     print("="*60)
