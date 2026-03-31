@@ -25,7 +25,8 @@ class StockInfo:
 class StockMgr:
     """从 QMT 数据源查询并构造 StockInfo"""
 
-    def query(self, stock: str) -> Optional[StockInfo]:
+
+    def query_stock(self, stock: str) -> Optional[StockInfo]:
         """查询单只股票的基本面快照，失败返回 None"""
         try:
             fin_data = xtdata.get_financial_data([stock], table_list=['PershareIndex', 'Income', 'Capital'], start_time='20250930', report_type='announce_time')
@@ -68,3 +69,10 @@ class StockMgr:
         except Exception as e:
             print(f"错误: {e}")
             return None
+    
+    def query_stocks_in_sector(self, sector) ->list :
+        weights = xtdata.get_index_weight(sector)
+        if not weights:
+            xtdata.download_index_weight()
+            weights = xtdata.get_index_weight(sector)
+        return list(weights.keys()) if weights else []

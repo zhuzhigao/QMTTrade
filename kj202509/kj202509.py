@@ -273,24 +273,19 @@ class AllWeatherStrategy:
                             self.ledger.add(etf)
                             print(f">> 发送委托: 买入 {etf}, 数量: {volume}股, 预估耗资: {volume*price:.2f}")
 
-    def get_sector_stocks(self, sector):
-        weights = xtdata.get_index_weight(sector)
-        if not weights:
-            xtdata.download_index_weight()
-            weights = xtdata.get_index_weight(sector)
-        return (weights.keys())
 
     def buy_a_shares(self, style):
         """核心业务 2：基本面选股，剔除劣质股后等权建仓A股"""
         print(f">> 开始执行 {style} 风格建仓逻辑...") 
         pool = []
         # 1. 获取基础候选股票池
+        mgr = StockMgr()
         if style == 'BIG':
             # 大盘风格：使用沪深300作为成分池
-            pool = self.get_sector_stocks('000300.SH')
+            pool = mgr.query_stocks_in_sector('000300.SH')
         else:
             # 小盘风格：使用中证1000代表优质微/小盘
-            pool = self.get_sector_stocks('000852.SH')
+            pool = mgr.query_stocks_in_sector('000852.SH')
 
         if not pool:
             print("!! 获取板块成分股失败，请检查QMT终端左下角【数据下载】是否下载了板块数据 !!")
@@ -381,7 +376,7 @@ class AllWeatherStrategy:
             mgr = StockMgr()
             rows = {}
             for stock in pool:
-                info = mgr.query(stock)
+                info = mgr.query_stock(stock)
                 if info is not None and info.is_valid():
                     rows[stock] = {
                         'roe':        info.roe,

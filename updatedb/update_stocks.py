@@ -10,7 +10,14 @@ import sqlite3
 import datetime
 from datetime import timezone, timedelta
 import os
+import sys
 import time
+
+parent_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+if parent_dir not in sys.path:
+    sys.path.append(parent_dir)
+from utils.stockmgr import StockMgr
+from xtquant import xtdata
 
 # ================= 1. 基础配置与网络防断装甲 =================
 DB_DIR = r'C:\Users\xiusan\OneDrive\Investment\Quant_data'
@@ -275,21 +282,33 @@ def update_audit_report_to_db(csv_path='audit_report.csv'):
         return False
 
 #Todo: Download XtQuant Historical data, finance data and index weight data.
+def download_xtquant_data():
+    mgr = StockMgr()
+    pool1  = mgr.query_stocks_in_sector('000300.SH')
+    pool2 = mgr.query_stocks_in_sector('000852.SH')
+    pool = list(pool1) + list(pool2) + ['000300.SH', '000852.SH']
+    xtdata.download_history_data2(pool, period='1d', start_time='20240101', end_time='', callback=lambda res: print(f">> 股票数据下载进度: {res}"))
+    time.sleep(5)
+    xtdata.download_financial_data2(pool, table_list=['PershareIndex','Income', 'Capital'], start_time='20250930',
+                                     callback=lambda res: print(f">> 财务数据下载进度: {res}"))
+
 
 # ================= 3. 执行主入口 =================
 if __name__ == '__main__':
-    print("="*60)
-    print("====== 宽客本地全量因子数据库更新程序启动 (实盘重试版) ======")
-    print("="*60)
+    # print("="*60)
+    # print("====== 宽客本地全量因子数据库更新程序启动 (实盘重试版) ======")
+    # print("="*60)
     
-    update_dividend_data_to_db()
-    time.sleep(3) # 模块间休眠
+    # update_dividend_data_to_db()
+    # time.sleep(3) # 模块间休眠
     
-    update_financial_report_to_db()
-    time.sleep(3) # 模块间休眠
+    # update_financial_report_to_db()
+    # time.sleep(3) # 模块间休眠
 
-    update_industry_data_to_db()
+    # update_industry_data_to_db()
     
-    update_audit_report_to_db()
+    # update_audit_report_to_db()
     
-    print("\n🎉 所有数据更新程序执行完毕！")
+    # print("\n🎉 所有数据更新程序执行完毕！")
+
+    download_xtquant_data()
