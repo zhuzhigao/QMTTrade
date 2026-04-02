@@ -5,6 +5,7 @@ import time
 import datetime
 import argparse
 import pandas as pd
+import numpy as np
 from xtquant import xtdata
 from xtquant.xttrader import XtQuantTrader, XtQuantTraderCallback
 from xtquant.xttype import StockAccount
@@ -55,6 +56,8 @@ class AllWeatherStrategy:
                 'weekly_check_week': -1,
                 'stop_loss_date': "",
                 'current_style': 'DEFENSE',
+                'monkey_check_date': "",
+                'is_paused': False,
             }
         )
         self.ledger = StrategyLedger(os.path.join(_base, 'strategy_09_holdings.json'))
@@ -66,6 +69,7 @@ class AllWeatherStrategy:
         print(">> 策略初始化完成，等待行情与时间触发...")
 
     # --- 类型化状态属性，读写自动持久化 ---
+    @property
     @property
     def monthly_adjusted_month(self) -> int:
         return self.state.get('monthly_adjusted_month')
@@ -98,6 +102,22 @@ class AllWeatherStrategy:
     def current_style(self, value: str):
         self.state.set('current_style', value)
 
+    @property
+    def monkey_check_date(self) -> str:
+        return self.state.get('monkey_check_date')
+
+    @monkey_check_date.setter
+    def monkey_check_date(self, value: str):
+        self.state.set('monkey_check_date', value)
+
+    @property
+    def is_paused(self) -> bool:
+        return self.state.get('is_paused')
+
+    @is_paused.setter
+    def is_paused(self, value: bool):
+        self.state.set('is_paused', value)
+
     def handlebar(self):
         """核心驱动函数，在主循环中被每秒调用一次"""
         now = datetime.datetime.now(BEIJING_TZ)
@@ -110,10 +130,29 @@ class AllWeatherStrategy:
         if not DEBUG and not ("09:30:00" <= current_time <= "15:00:00"):
             return
 
+        # =========================================================
+        # 模块 0：全局猴市巡检 (每日 09:31 触发一次)
+        # =========================================================
+        if DEBUG or current_time >= "09:31:00" and self.monkey_check_date != current_date:
+            print(f"[{current_time}] 执行市场环境 (猴市) 巡检...")
+            if is_monkey_market():
+                print(">> ⚠️ 猴市警报：当前市场处于宽幅无序震荡，极易双边打脸！")
+                self.is_paused = True # 开启策略暂停锁
+                
+                # 如果当前还在持有 A 股，立刻强制切入防御模式
+                if self.current_style != 'DEFENSE':
+                    print(">> 自动拦截：强制切换至外盘 ETF 防御模式，并挂起策略！")
+                    self.current_style = 'DEFENSE'
+                    self.buy_defense_etf()
+            else:
+                if not self.is_paused:
+                    print(">> ✅ 市场趋势已明朗，解除猴市预警，恢复策略运行。")
+                self.is_paused = False
+            self.monkey_check_date = current_date
         # ---------------------------------------------------------
         # 模块 1：月度调仓与平滑动量指标 (每月第一个交易日 09:35 执行)
         # ---------------------------------------------------------
-        if DEBUG or (current_time >= "09:35:00" and self.monthly_adjusted_month != current_month):
+        if DEBUG or (current_time >= "09:35:00" and self.monthly_adjusted_month != current_month and not self.is_paused):
             print(f"[{current_time}] 执行月度动量研判与调仓...")
 
             # 下载并获取近21天日线数据
@@ -164,8 +203,8 @@ class AllWeatherStrategy:
         # ---------------------------------------------------------
         # 模块 2：周度熔断观察 (每周五 14:30)
         # ---------------------------------------------------------
-        if current_time >= self.circuit_breaker_time and self.weekly_check_week != current_week:
-            if now.weekday() == 4: # 4 代表周五
+        if DEBUG or (current_time >= self.circuit_breaker_time and self.weekly_check_week != current_week and not self.is_paused):
+            if DEBUG or now.weekday() == 4: # 4 代表周五
                 print(f"[{current_time}] 执行周度熔断审查...")
                 benchmark = self.benchmark_big if self.current_style == 'BIG' else self.benchmark_small
 
@@ -176,6 +215,7 @@ class AllWeatherStrategy:
                 if 'close' in b_data and not b_data['close'].empty:
                     closes = b_data['close'].iloc[0]
                     ma20 = closes.mean()
+                    
                     current_price = closes.iloc[-1]
 
                     if current_price < ma20 and self.current_style != 'DEFENSE':
@@ -188,7 +228,7 @@ class AllWeatherStrategy:
         # ---------------------------------------------------------
         # 模块 3：日内硬止损 (每日 14:45 执行)
         # ---------------------------------------------------------
-        if current_time >= self.stop_loss_time and self.stop_loss_date != current_date:
+        if DEBUG or (current_time >= self.stop_loss_time and self.stop_loss_date != current_date):
             # 获取当前账号持仓
             positions = self.trader.query_stock_positions(self.account)
             if positions:
@@ -211,12 +251,14 @@ class AllWeatherStrategy:
                             if current_price < cost_price * 0.92:
                                 print(f"!! 止损触发 !! [{stock}] 现价 {current_price} 跌破成本 {cost_price} 达 8%")
                                 # 异步市价清仓
+                                seq = -1
                                 if not DEBUG:
-                                    self.trader.order_stock_async(
+                                    seq = self.trader.order_stock(
                                         self.account, stock, xtconstant.STOCK_SELL,
                                         pos.can_use_volume, xtconstant.LATEST_PRICE, 0, 'strategy_stop_loss', '09: 止损卖出'
                                     )
-                                self.ledger.remove(stock)
+                                if seq != -1:
+                                    self.ledger.remove(stock)
                                 print(">> 提示：止损后腾出资金空仓保留，不向下摊平。")
 
             self.stop_loss_date = current_date
@@ -232,15 +274,18 @@ class AllWeatherStrategy:
         if positions:
             for pos in positions:
                 if pos.can_use_volume > 0 and pos.stock_code not in self.foreign_etf and self.ledger.is_in_ledger(pos.stock_code):
+                    seq = -1
                     if not DEBUG:
-                        self.trader.order_stock_async(
+                        seq = self.trader.order_stock(
                             self.account, pos.stock_code, xtconstant.STOCK_SELL,
                             pos.can_use_volume, xtconstant.LATEST_PRICE, 0, 'strategy_clear', '09: 清仓避险'
                         )
-                    self.ledger.remove(pos.stock_code)
+                    if seq != -1:
+                        self.ledger.remove(pos.stock_code)
         
         # 等待20秒，确保清仓订单成交、资金释放回账户
-        time.sleep(20)
+        if not DEBUG:
+            time.sleep(20)
         
         # 2. 获取最新可用资金
         asset = self.trader.query_stock_asset(self.account)
@@ -265,12 +310,14 @@ class AllWeatherStrategy:
                         # 计算买入股数（向下取整到 100 的整数倍）
                         volume = int(target_value_per_etf / price / 100) * 100
                         if volume >= 100:
+                            seq = -1
                             if not DEBUG:
-                                self.trader.order_stock_async(
+                                seq = self.trader.order_stock(
                                     self.account, etf, xtconstant.STOCK_BUY,
                                     volume, xtconstant.LATEST_PRICE, 0, 'strategy_buy_etf', '09: 买入外盘ETF'
                                 )
-                            self.ledger.add(etf)
+                            if seq != -1:
+                                self.ledger.add(etf)
                             print(f">> 发送委托: 买入 {etf}, 数量: {volume}股, 预估耗资: {volume*price:.2f}")
 
 
@@ -320,14 +367,16 @@ class AllWeatherStrategy:
                 if self.ledger.is_in_ledger(pos.stock_code):
                     hold_codes.append(pos.stock_code)  # 只记录本策略持有的股票
                 if self.ledger.is_in_ledger(pos.stock_code) and pos.stock_code not in target_list and pos.can_use_volume > 0:
+                    seq = -1
                     if not DEBUG:
-                        self.trader.order_stock_async(
+                        seq = self.trader.order_stock(
                             self.account, pos.stock_code, xtconstant.STOCK_SELL,
                             pos.can_use_volume, xtconstant.LATEST_PRICE, 0, 'strategy_sell_a', '09: 不符风格卖出'
                         )
-                    self.ledger.remove(pos.stock_code)
-
-        time.sleep(20) # 等待平仓资金释放
+                    if seq != -1: 
+                        self.ledger.remove(pos.stock_code)
+        if not DEBUG:
+            time.sleep(20) # 等待平仓资金释放
         
         # 4.2 计算现金并买入新目标
         asset = self.trader.query_stock_asset(self.account)
@@ -350,12 +399,14 @@ class AllWeatherStrategy:
                         if price > 0:
                             volume = int(cash_per_stock / price / 100) * 100
                             if volume >= 100:
+                                seq = -1
                                 if not DEBUG:
-                                    self.trader.order_stock_async(
+                                    seq = self.trader.order_stock(
                                         self.account, code, xtconstant.STOCK_BUY,
                                         volume, xtconstant.LATEST_PRICE, 0, 'strategy_buy_a', f'09: 建仓{style}'
                                     )
-                                self.ledger.add(code)
+                                if seq != -1:
+                                    self.ledger.add(code)
                                 print(f">> 发送委托: 买入 {code}, 数量: {volume}股, 预估耗资: {volume*price:.2f}")
 
 
@@ -389,7 +440,6 @@ class AllWeatherStrategy:
             if not rows:
                 print(">> 警告：未能获取任何有效财务数据，请确认是否在QMT下载了财务数据！将默认返回前3只股票...")
                 return pool[:self.stock_num]
-
             df = pd.DataFrame.from_dict(rows, orient='index').dropna()
             print(df.head(5))
 
@@ -418,6 +468,66 @@ class AllWeatherStrategy:
         except Exception as e:
             print(f">> 基本面数据处理出错: {e}，返回默认前3只。")
             return pool[:self.stock_num]
+
+
+def is_monkey_market(stock_code='000300.SH', window=20, er_threshold=0.25, vol_threshold=0.015):
+    """
+    判断指定标的（如大盘指数）当前是否处于“猴市”环境。
+    
+    参数:
+    - stock_code: 宽基指数代码，默认沪深300 ('000300.SH')
+    - window: 观察周期，默认 20 个交易日（约一个月）
+    - er_threshold: 效率系数阈值，低于此值说明趋势性弱（多空来回拉锯）
+    - vol_threshold: 波动率变异系数阈值，高于此值说明上下振幅大
+    
+    返回:
+    - bool: True 表示处于猴市，False 表示非猴市（趋势市或极低波动的死市）
+    """
+    # 1. 补充下载最近的日线数据 (防止本地数据缺失)
+    # 注意：实盘中建议在每天初始化时统一全量下载，此处仅作兜底
+    xtdata.download_history_data2([stock_code], '1d', '20260101', '')
+    
+    # 2. 从本地缓存获取最近 window + 1 天的收盘价
+    data = xtdata.get_market_data(
+        field_list=['close'], 
+        stock_list=[stock_code], 
+        period='1d', 
+        count=window + 1
+    )
+    
+    # 异常处理：如果没有取到足够的数据
+    if stock_code not in data['close'].index or len(data['close'].columns) < window + 1:
+        print(f"!! 警告: {stock_code} 日线数据不足，无法计算猴市指标 !!")
+        return False
+        
+    # 获取收盘价时间序列数组
+    closes = data['close'].loc[stock_code].values
+    
+    # 3. 计算考夫曼效率系数 (ER)
+    # net_change: 首尾的绝对差值（净位移）
+    net_change = abs(closes[-1] - closes[0])
+    # sum_of_changes: 每一天涨跌幅绝对值的总和（总路程）
+    sum_of_changes = np.sum(np.abs(np.diff(closes)))
+    
+    # 防止除以 0 的情况（比如连续停牌）
+    if sum_of_changes == 0:
+        er = 0.0
+    else:
+        er = net_change / sum_of_changes
+        
+    # 4. 计算变异系数 (CV - 衡量波动幅度)
+    # 用周期内收盘价的标准差除以均值，消除绝对价格高低的影响
+    cv_volatility = np.std(closes) / np.mean(closes)
+    
+    # 5. 综合判断逻辑
+    # 没趋势 (ER < 阈值) 且 波动大 (CV > 阈值) = 猴市
+    is_monkey = (er < er_threshold) and (cv_volatility > vol_threshold)
+    
+    # 打印调试信息
+    status = "⚠️猴市(宽幅震荡)" if is_monkey else "✅非猴市(趋势或地量)"
+    print(f"[{stock_code}] 考夫曼ER: {er:.4f}, 变异系数CV: {cv_volatility:.4f} -> 研判: {status}")
+    
+    return bool(is_monkey)
 
 
 # ================= 3. 主函数执行入口 (Main) =================

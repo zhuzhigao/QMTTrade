@@ -1,6 +1,8 @@
 {
-    "monthly_adjusted_month": 3,
-    "weekly_check_week": -1,
+    "monthly_adjusted_month": 4,
+    "weekly_check_week": 14,
     "stop_loss_date": "",
-    "current_style": "SMALL"
+    "current_style": "DEFENSE",
+    "monkey_check_date": "20260402",
+    "is_paused": true
 }
