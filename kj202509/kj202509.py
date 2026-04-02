@@ -5,7 +5,6 @@ import time
 import datetime
 import argparse
 import pandas as pd
-import numpy as np
 from xtquant import xtdata
 from xtquant.xttrader import XtQuantTrader, XtQuantTraderCallback
 from xtquant.xttype import StockAccount
@@ -16,7 +15,8 @@ parent_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 if parent_dir not in sys.path:
     sys.path.append(parent_dir)
 from utils.utilities import StrategyLedger, StateManager
-from utils.stockmgr import StockInfo, StockMgr
+from utils.stockmgr import  StockMgr
+from utils.marketmgr import MarketMgr
 
 
 BEIJING_TZ = timezone(timedelta(hours=8))
@@ -135,7 +135,7 @@ class AllWeatherStrategy:
         # =========================================================
         if DEBUG or current_time >= "09:31:00" and self.monkey_check_date != current_date:
             print(f"[{current_time}] 执行市场环境 (猴市) 巡检...")
-            if is_monkey_market():
+            if MarketMgr().is_monkey_market():
                 print(">> ⚠️ 猴市警报：当前市场处于宽幅无序震荡，极易双边打脸！")
                 self.is_paused = True # 开启策略暂停锁
                 
@@ -468,67 +468,6 @@ class AllWeatherStrategy:
         except Exception as e:
             print(f">> 基本面数据处理出错: {e}，返回默认前3只。")
             return pool[:self.stock_num]
-
-
-def is_monkey_market(stock_code='000300.SH', window=20, er_threshold=0.25, vol_threshold=0.015):
-    """
-    判断指定标的（如大盘指数）当前是否处于“猴市”环境。
-    
-    参数:
-    - stock_code: 宽基指数代码，默认沪深300 ('000300.SH')
-    - window: 观察周期，默认 20 个交易日（约一个月）
-    - er_threshold: 效率系数阈值，低于此值说明趋势性弱（多空来回拉锯）
-    - vol_threshold: 波动率变异系数阈值，高于此值说明上下振幅大
-    
-    返回:
-    - bool: True 表示处于猴市，False 表示非猴市（趋势市或极低波动的死市）
-    """
-    # 1. 补充下载最近的日线数据 (防止本地数据缺失)
-    # 注意：实盘中建议在每天初始化时统一全量下载，此处仅作兜底
-    xtdata.download_history_data2([stock_code], '1d', '20260101', '')
-    
-    # 2. 从本地缓存获取最近 window + 1 天的收盘价
-    data = xtdata.get_market_data(
-        field_list=['close'], 
-        stock_list=[stock_code], 
-        period='1d', 
-        count=window + 1
-    )
-    
-    # 异常处理：如果没有取到足够的数据
-    if stock_code not in data['close'].index or len(data['close'].columns) < window + 1:
-        print(f"!! 警告: {stock_code} 日线数据不足，无法计算猴市指标 !!")
-        return False
-        
-    # 获取收盘价时间序列数组
-    closes = data['close'].loc[stock_code].values
-    
-    # 3. 计算考夫曼效率系数 (ER)
-    # net_change: 首尾的绝对差值（净位移）
-    net_change = abs(closes[-1] - closes[0])
-    # sum_of_changes: 每一天涨跌幅绝对值的总和（总路程）
-    sum_of_changes = np.sum(np.abs(np.diff(closes)))
-    
-    # 防止除以 0 的情况（比如连续停牌）
-    if sum_of_changes == 0:
-        er = 0.0
-    else:
-        er = net_change / sum_of_changes
-        
-    # 4. 计算变异系数 (CV - 衡量波动幅度)
-    # 用周期内收盘价的标准差除以均值，消除绝对价格高低的影响
-    cv_volatility = np.std(closes) / np.mean(closes)
-    
-    # 5. 综合判断逻辑
-    # 没趋势 (ER < 阈值) 且 波动大 (CV > 阈值) = 猴市
-    is_monkey = (er < er_threshold) and (cv_volatility > vol_threshold)
-    
-    # 打印调试信息
-    status = "⚠️猴市(宽幅震荡)" if is_monkey else "✅非猴市(趋势或地量)"
-    print(f"[{stock_code}] 考夫曼ER: {er:.4f}, 变异系数CV: {cv_volatility:.4f} -> 研判: {status}")
-    
-    return bool(is_monkey)
-
 
 # ================= 3. 主函数执行入口 (Main) =================
 if __name__ == '__main__':
