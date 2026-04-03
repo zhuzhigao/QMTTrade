@@ -6,7 +6,9 @@ import datetime
 import matplotlib.pyplot as plt
 import platform
 from factor_selection import select  # 请确保 select 已支持 end_time 参数
-from factor_lib import get_market_sentiment, shift_date
+import sys, os; sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+from utils.marketmgr import MarketMgr
+from utils.utilities import DateMgr
 
 # ================= 强化回测配置 =================
 STOCK_POOL = ['301308.SZ', '603986.SH', '002920.SZ', '002555.SZ', '601919.SH', '601857.SH', '601788.SH', '600887.SH', 
@@ -63,7 +65,7 @@ def run_professional_backtest():
     for i, dt_str in enumerate(trading_days):
         daily_prices = xtdata.get_market_data_ex(
             ['close', 'high', 'low'], STOCK_POOL, '1d', 
-            start_time=dt_str, end_time=shift_date(dt_str, 2), dividend_type = 'front')
+            start_time=dt_str, end_time=DateMgr.shift_date(dt_str, 2), dividend_type = 'front')
 
         # A. 计算当日市值
         market_value = 0
@@ -81,7 +83,7 @@ def run_professional_backtest():
             # 传入当前的 dt_str，让 select 函数只用今天之前的数据
             try:
                 selected_df = select(stock_pool=STOCK_POOL, at_date=dt_str, sector= False, top_n=10, download=False, 
-                                     sentiment=get_market_sentiment(BENCHMARK, dt_str), output= False)
+                                     sentiment=MarketMgr().get_market_sentiment(BENCHMARK, dt_str), output= False)
                 top_targets = selected_df.index.tolist()[:BUYIN_COUNT]
             except Exception as e:
                 print(f"[{dt_str}] 选股出错: {e}")

@@ -8,7 +8,8 @@ from xtquant.xttrader import XtQuantTrader
 from xtquant.xttype import StockAccount
    #print("=== 正在加载选股模块 ===")
 from factor_selection import select
-from factor_lib import get_market_sentiment
+import sys; sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+from utils.marketmgr import MarketMgr
     #print("=== 完成加载选股模块 ===")
 # ================= 配置区 =================
 ACC_ID = '47601131'
@@ -72,7 +73,7 @@ def order_stock(xt_trader: XtQuantTrader, acc, stock, order_type, order_volume, 
 def run_strategy():  
     tradedate = datetime.date.today().strftime('%Y%m%d')
     #tradedate = '20250101'
-    sentiment = get_market_sentiment(BENCHMARK, tradedate, SHORTTERM_DAYS)
+    sentiment = MarketMgr().get_market_sentiment(BENCHMARK, tradedate, SHORTTERM_DAYS)
     download = False
     if download:
         print('稳固IPC通道：10s')

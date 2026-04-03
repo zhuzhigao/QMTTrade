@@ -28,6 +28,7 @@ if parent_dir not in sys.path:
     sys.path.append(parent_dir)
 
 from utils.utilities import MessagePusher
+from utils.marketmgr import MarketMgr
 
 BEIJING_TZ = timezone(timedelta(hours=8))
 DEBUG = False
@@ -129,37 +130,6 @@ class Config:
 
 
 # ======================== 2. 核心算法逻辑 ========================
-def get_rsrs_signal():
-    """计算大盘RSRS择时信号"""
-    print(f"正在计算 {Config.index_code} 的 RSRS 信号...")
-    # 获取历史数据
-    start_date = (datetime.datetime.now(BEIJING_TZ) - datetime.timedelta(days=Config.rsrs_m + Config.rsrs_n)).strftime("%Y%m%d")
-    xtdata.download_history_data(Config.index_code, period='1d', start_time=start_date, end_time='')
-    xtdata.download_history_data(Config.index_code, period='1m', start_time=datetime.datetime.now(BEIJING_TZ).strftime("%Y%m%d"), end_time='')
-
-    data = xtdata.get_market_data_ex(['high', 'low'], [Config.index_code], period='1d', count=Config.rsrs_m + Config.rsrs_n, dividend_type='front')[Config.index_code]
-    
-    highs = data['high'].values
-    lows = data['low'].values
-    
-    if len(highs) < Config.rsrs_n + 2:
-        raise ValueError(f"RSRS 数据不足：需要至少 {Config.rsrs_n + 2} 条，实际获取 {len(highs)} 条，请检查数据下载。")
-
-    slopes = []
-    for i in range(len(highs) - Config.rsrs_n + 1):
-        y = highs[i : i + Config.rsrs_n]
-        x = lows[i : i + Config.rsrs_n]
-        slope, _, _, _, _ = stats.linregress(x, y)
-        slopes.append(slope)
-
-    # 标准化（至少需要2个slope：1个当前 + 1个历史）
-    if len(slopes) < 2:
-        raise ValueError(f"RSRS slopes 数量不足以标准化：{len(slopes)} 个，请增大 rsrs_m 或检查数据。")
-
-    current_slope = slopes[-1]
-    history_slopes = slopes[:-1]
-    z_score = (current_slope - np.mean(history_slopes)) / np.std(history_slopes)
-    return z_score
 
 def filter_audit_opinion(pool):
     """审计意见防火墙 (兼容股票)"""
@@ -249,7 +219,7 @@ class RobotTrader:
         is_monday = (bj_now.weekday() == 0)
 
         # 1. 计算择时
-        z = get_rsrs_signal()
+        z = MarketMgr().get_rsrs_signal(Config.index_code, Config.rsrs_n, Config.rsrs_m)
         print(f"当前 RSRS Z-Score: {z:.2f}")
 
         # 2. 选股与过滤

@@ -4,7 +4,7 @@ import datetime
 import requests
 from datetime import timezone, timedelta
 
-__all__ = ['StrategyLedger', 'BlacklistManager', 'MessagePusher', 'StateManager']
+__all__ = ['StrategyLedger', 'BlacklistManager', 'MessagePusher', 'StateManager', 'DateMgr']
 
 BEIJING_TZ = timezone(timedelta(hours=8))
 
@@ -151,6 +151,26 @@ class StrategyLedger:
         """获取当前策略名下的所有股票"""
         return self.holdings
     
+
+class DateMgr:
+    """日期工具类"""
+
+    @staticmethod
+    def shift_date(date_str: str, n: int) -> str:
+        """
+        根据给定的日期字符串加减 n 天
+        :param date_str: 初始日期字符串，格式为 '20250101'
+        :param n: 加减的天数，正数为加，负数为减
+        :return: 处理后的日期字符串，格式为 '20250101'
+        """
+        try:
+            dt_obj = datetime.datetime.strptime(date_str, '%Y%m%d')
+            new_date_obj = dt_obj + datetime.timedelta(days=n)
+            return new_date_obj.strftime('%Y%m%d')
+        except Exception as e:
+            print(f"日期转换错误: {e}")
+            return date_str
+
 
 class MessagePusher:
     """

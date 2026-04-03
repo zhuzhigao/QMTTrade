@@ -1,13 +1,19 @@
 __all__ = ['MarketMgr']
 
+import datetime
 import numpy as np
+from scipy import stats
+from datetime import timezone, timedelta
 from xtquant import xtdata
+
+BEIJING_TZ = timezone(timedelta(hours=8))
 
 
 class MarketMgr:
     """市场环境研判工具"""
 
-    def is_monkey_market(self, stock_code='000300.SH', window=20, er_threshold=0.25, vol_threshold=0.015) -> bool:
+    @staticmethod
+    def is_monkey_market(stock_code='000300.SH', window=20, er_threshold=0.25, vol_threshold=0.015) -> bool:
         """
         判断指定标的（如大盘指数）当前是否处于"猴市"环境。
 
@@ -54,3 +60,69 @@ class MarketMgr:
         print(f"[{stock_code}] 考夫曼ER: {er:.4f}, 变异系数CV: {cv_volatility:.4f} -> 研判: {status}")
 
         return bool(is_monkey)
+
+    @staticmethod
+    def get_rsrs_signal(index_code='000300.SH', rsrs_n=18, rsrs_m=600) -> float:
+        """
+        计算大盘RSRS择时信号，返回标准化Z-Score。
+
+        参数:
+        - index_code: 择时基准指数，默认沪深300
+        - rsrs_n: RSRS回归窗口（交易日数）
+        - rsrs_m: 标准化基准天数
+        """
+        print(f"正在计算 {index_code} 的 RSRS 信号...")
+        start_date = (datetime.datetime.now(BEIJING_TZ) - datetime.timedelta(days=rsrs_m + rsrs_n)).strftime("%Y%m%d")
+        xtdata.download_history_data(index_code, period='1d', start_time=start_date, end_time='')
+        xtdata.download_history_data(index_code, period='1m', start_time=datetime.datetime.now(BEIJING_TZ).strftime("%Y%m%d"), end_time='')
+
+        data = xtdata.get_market_data_ex(['high', 'low'], [index_code], period='1d', count=rsrs_m + rsrs_n, dividend_type='front')[index_code]
+        highs = data['high'].values
+        lows = data['low'].values
+
+        if len(highs) < rsrs_n + 2:
+            raise ValueError(f"RSRS 数据不足：需要至少 {rsrs_n + 2} 条，实际获取 {len(highs)} 条，请检查数据下载。")
+
+        slopes = []
+        for i in range(len(highs) - rsrs_n + 1):
+            slope, _, _, _, _ = stats.linregress(lows[i:i + rsrs_n], highs[i:i + rsrs_n])
+            slopes.append(slope)
+
+        if len(slopes) < 2:
+            raise ValueError(f"RSRS slopes 数量不足以标准化：{len(slopes)} 个，请增大 rsrs_m 或检查数据。")
+
+        current_slope = slopes[-1]
+        history_slopes = slopes[:-1]
+        z_score = (current_slope - np.mean(history_slopes)) / np.std(history_slopes)
+        return z_score
+
+    @staticmethod
+    def get_market_sentiment(benchmark: str, at_date: str, sentiment_duration: int = 20) -> int:
+        """
+        识别市场环境。
+
+        返回:
+        - 1: 牛市（价格在均线上方 2% 以上）
+        - 2: 熊市（价格在均线下方 2% 以上）
+        - 3: 震荡市
+        """
+        market_data = xtdata.get_market_data_ex(
+            field_list=['close'],
+            stock_list=[benchmark],
+            period='1d',
+            count=sentiment_duration * 2,
+            end_time=at_date,
+            dividend_type='front'
+        )
+        index_series = market_data[benchmark]['close']
+        ma20 = index_series.rolling(sentiment_duration).mean().iloc[-1]
+        current_price = index_series.iloc[-1]
+
+        if current_price > ma20 * 1.02:
+            print('牛市')
+            return 1
+        if current_price < ma20 * 0.98:
+            print('熊市')
+            return 2
+        print('震荡市')
+        return 3

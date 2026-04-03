@@ -5,7 +5,8 @@ import pandas as pd
 from datetime import datetime
 from xtquant import xtdata
 from factor_selection import select
-from factor_lib import get_market_sentiment
+import sys, os; sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+from utils.marketmgr import MarketMgr
 
 STOCK_POOL = ['301308.SZ', '603986.SH', '002920.SZ', '002555.SZ', '601919.SH', '601857.SH', '601788.SH', '600887.SH']
 # , 
@@ -59,7 +60,7 @@ class QMT_Selective_StopLoss_Strategy(bt.Strategy):
         # --- 2. 调仓逻辑 (每5天触发) ---
         if self.count % self.p.rebalance_freq == 0:
             # A. 选股
-            sentiment = get_market_sentiment('000300.SH', dt_str)
+            sentiment = MarketMgr().get_market_sentiment('000300.SH', dt_str)
             try:
                 selected_df = select(stock_pool=self.stock_pool, at_date=dt_str, sector=False, 
                                      top_n=10, download=False, sentiment=sentiment, output=False)
