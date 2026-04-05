@@ -5,7 +5,10 @@ import matplotlib.pyplot as plt
 from xtquant import xtdata  # 假设你在QMT环境下，直接用内置数据获取
 
 # ================= 可配置参数 =================
-DEFENSE_ETFS = ['518880.SH', '513100.SH']  # 防御ETF列表，可自由增减，等权分配
+DEFENSE_ETFS        = ['518880.SH', '513100.SH']  # 防御ETF列表，可自由增减，等权分配
+ENABLE_MONKEY_CHECK = True   # True: 启用猴市巡检（模块0）；False: 禁用，仅依赖月度动量+周度熔断
+SAVE_PLOT           = True   # True: 保存图表到文件；False: 仅显示不保存
+PLOT_DIR            = r'C:\Users\xiusan\OneDrive\Investment\QMTTrade\kj202509'  # 图表保存目录
 
 # ================= 1. 数据获取与预处理 =================
 def get_local_data(code_list, start_time):
@@ -22,7 +25,7 @@ def get_local_data(code_list, start_time):
 
 # 2022年1月至今
 codes = ['000300.SH', '000852.SH'] + DEFENSE_ETFS
-raw_data = get_local_data(codes, '20220101')
+raw_data = get_local_data(codes, '20230101')
 
 # 对齐数据
 df = pd.DataFrame(index=raw_data['000300.SH'].index)
@@ -50,19 +53,22 @@ def calc_mom(series):
 df['mom_300'] = calc_mom(df['close_300'])
 df['mom_852'] = calc_mom(df['close_852'])
 
-# 猴市判断（向量化复现 MarketMgr.is_monkey_market 逻辑）
+# 猴市判断（向量化复现 MarketMgr.is_monkey_market 逻辑，ENABLE_MONKEY_CHECK=False 时跳过）
 # MarketMgr 使用 count=window+1=21 个点：
 #   ER  = |close[-1] - close[0]| / sum(|daily_changes|)  →  20期净变化 / 20期绝对变化之和
 #   CV  = std(closes) / mean(closes)                      →  21点的变异系数
-_MONKEY_WINDOW     = 20
-_ER_THRESHOLD      = 0.25
-_VOL_THRESHOLD     = 0.015
-_c = df['close_300']
-_net_change  = (_c - _c.shift(_MONKEY_WINDOW)).abs()
-_sum_changes = _c.diff().abs().rolling(_MONKEY_WINDOW).sum()
-_er          = (_net_change / _sum_changes.replace(0, np.nan)).fillna(0.0)
-_cv          = _c.rolling(_MONKEY_WINDOW + 1).std() / _c.rolling(_MONKEY_WINDOW + 1).mean()
-df['is_monkey'] = ((_er < _ER_THRESHOLD) & (_cv > _VOL_THRESHOLD)).fillna(False)
+if ENABLE_MONKEY_CHECK:
+    _MONKEY_WINDOW = 20
+    _ER_THRESHOLD  = 0.25
+    _VOL_THRESHOLD = 0.015
+    _c = df['close_300']
+    _net_change  = (_c - _c.shift(_MONKEY_WINDOW)).abs()
+    _sum_changes = _c.diff().abs().rolling(_MONKEY_WINDOW).sum()
+    _er          = (_net_change / _sum_changes.replace(0, np.nan)).fillna(0.0)
+    _cv          = _c.rolling(_MONKEY_WINDOW + 1).std() / _c.rolling(_MONKEY_WINDOW + 1).mean()
+    df['is_monkey'] = ((_er < _ER_THRESHOLD) & (_cv > _VOL_THRESHOLD)).fillna(False)
+else:
+    df['is_monkey'] = False
 
 # ================= 3. 模拟交易循环 =================
 cash                  = 1000000.0
@@ -90,7 +96,7 @@ for i in range(len(df)):
     current_month = today.month
 
     # 模块0：猴市巡检 — 猴市时强制 DEFENSE，同时挂起月度/周度模块（is_paused=True）
-    if is_monkey:
+    if ENABLE_MONKEY_CHECK and is_monkey:
         target_style = 'DEFENSE'
     else:
         # 模块2：周五熔断，使用当前风格对应的基准指数，优先于月度调仓
@@ -116,13 +122,17 @@ for i in range(len(df)):
 
     # 模拟调仓
     if target_style != hold_style:
+        date_str = today.strftime("%Y-%m-%d")
+
         # 1. 清仓全部当前持仓
         if equity_pos > 0:
-            eq_price = close_852 if hold_style == 'SMALL' else close_300
+            eq_code  = '000852.SH' if hold_style == 'SMALL' else '000300.SH'
+            eq_price = close_852   if hold_style == 'SMALL' else close_300
             sell_amount = equity_pos * eq_price
             fee = max(sell_amount * 0.0001, 5.0)
             cash += sell_amount - fee
             commissions_paid += fee
+            print(f"[{date_str}] SELL  {eq_code:<12}  shares={equity_pos:>12.2f}  price={eq_price:>8.3f}  amount={sell_amount:>12.2f}  fee={fee:>7.2f}")
             equity_pos = 0.0
 
         for etf in DEFENSE_ETFS:
@@ -131,6 +141,7 @@ for i in range(len(df)):
                 fee = max(sell_amount * 0.0001, 5.0)
                 cash += sell_amount - fee
                 commissions_paid += fee
+                print(f"[{date_str}] SELL  {etf:<12}  shares={etf_positions[etf]:>12.2f}  price={etf_prices[etf]:>8.3f}  amount={sell_amount:>12.2f}  fee={fee:>7.2f}")
                 etf_positions[etf] = 0.0
 
         # 2. 买入目标
@@ -140,6 +151,7 @@ for i in range(len(df)):
             cash -= buy_amount
             equity_pos = (buy_amount - fee) / close_300
             commissions_paid += fee
+            print(f"[{date_str}] BUY   {'000300.SH':<12}  shares={equity_pos:>12.2f}  price={close_300:>8.3f}  amount={buy_amount:>12.2f}  fee={fee:>7.2f}")
 
         elif target_style == 'SMALL':
             buy_amount = cash
@@ -147,6 +159,7 @@ for i in range(len(df)):
             cash -= buy_amount
             equity_pos = (buy_amount - fee) / close_852
             commissions_paid += fee
+            print(f"[{date_str}] BUY   {'000852.SH':<12}  shares={equity_pos:>12.2f}  price={close_852:>8.3f}  amount={buy_amount:>12.2f}  fee={fee:>7.2f}")
 
         else:  # DEFENSE: 等权买入所有防御ETF
             per_etf_cash = cash / len(DEFENSE_ETFS)
@@ -155,7 +168,9 @@ for i in range(len(df)):
                 cash -= per_etf_cash
                 etf_positions[etf] = (per_etf_cash - fee) / etf_prices[etf]
                 commissions_paid += fee
+                print(f"[{date_str}] BUY   {etf:<12}  shares={etf_positions[etf]:>12.2f}  price={etf_prices[etf]:>8.3f}  amount={per_etf_cash:>12.2f}  fee={fee:>7.2f}")
 
+        print(f"[{date_str}] >> {hold_style or 'INIT'} -> {target_style}  cash_after={cash:>12.2f}")
         hold_style = target_style
 
     # 各资产使用各自实际价格计算净值
@@ -171,12 +186,32 @@ df['benchmark_value'] = (df['close_300'] / df['close_300'].iloc[0]) * 1000000
 total_return = (df['strategy_value'].iloc[-1] / 1000000) - 1
 max_drawdown = (df['strategy_value'] / df['strategy_value'].cummax() - 1).min()
 
+# 逐年收益：每年首末交易日收盘价计算
+yearly_start = df['strategy_value'].resample('YE').first()
+yearly_end   = df['strategy_value'].resample('YE').last()
+yearly_return = (yearly_end / yearly_start - 1).rename('strategy')
+
+bm_yearly_start = df['benchmark_value'].resample('YE').first()
+bm_yearly_end   = df['benchmark_value'].resample('YE').last()
+bm_yearly_return = (bm_yearly_end / bm_yearly_start - 1).rename('benchmark')
+
+avg_yearly_return = yearly_return.mean()
+
 print(f"--- 回测结果 (2022-至今) ---")
 print(f"防御ETF: {DEFENSE_ETFS}")
 print(f"注意：日内个股8%止损（模块3）未纳入回测，实盘表现可能略有偏差。")
-print(f"最终收益率: {total_return:.2%}")
-print(f"最大回撤:   {max_drawdown:.2%}")
-print(f"累计手续费: {commissions_paid:.2f} 元")
+print(f"最终收益率:   {total_return:.2%}")
+print(f"最大回撤:     {max_drawdown:.2%}")
+print(f"累计手续费:   {commissions_paid:.2f} 元")
+print(f"年均收益率:   {avg_yearly_return:.2%}")
+print(f"")
+print(f"{'年份':<6}  {'策略收益':>10}  {'沪深300':>10}")
+print(f"{'------':<6}  {'----------':>10}  {'----------':>10}")
+for year in yearly_return.index:
+    y     = year.year
+    strat = yearly_return.loc[year]
+    bm    = bm_yearly_return.loc[year] if year in bm_yearly_return.index else float('nan')
+    print(f"{y:<6}  {strat:>10.2%}  {bm:>10.2%}")
 
 plt.figure(figsize=(12,6))
 plt.plot(df['strategy_value'], label='My All-Weather Strategy')
@@ -184,4 +219,14 @@ plt.plot(df['benchmark_value'], label='Benchmark (HS300)', linestyle='--')
 plt.title('Backtest Result: 2022-Now')
 plt.legend()
 plt.grid(True)
+
+if SAVE_PLOT:
+    import os
+    ts = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
+    path = os.path.join(PLOT_DIR, f"regression_nomonkey.png")
+    if ENABLE_MONKEY_CHECK:
+        path = os.path.join(PLOT_DIR, f"regression_withmonkey.png")
+    plt.savefig(path, dpi=150, bbox_inches='tight')
+    print(f"图表已保存: {path}")
+
 plt.show()
