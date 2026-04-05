@@ -12,13 +12,15 @@ from utils.stockmgr import StockMgr
 # ================= 可配置参数 =================
 DEFENSE_ETFS        = ['518880.SH', '513100.SH']  # 防御ETF列表，可自由增减，等权分配
 STOCK_NUM           = 3      # 每次选股数量，与策略 stock_num 一致
-REBALANCE_DAY       = 10     # 每月几号（自然日）之后首个交易日调仓
+REBALANCE_DAY       = 1     # 每月几号（自然日）之后首个交易日调仓
 ENABLE_MONKEY_CHECK = True   # True: 启用猴市巡检（模块0）；False: 禁用
 SAVE_PLOT           = True   # True: 保存图表到文件；False: 仅显示不保存
 PLOT_DIR            = r'C:\Users\xiusan\OneDrive\Investment\QMTTrade\kj202509'
 
 START_TIME = '20230101'  # 回测起始日期
 END_TIME = '20260401'
+
+BUDGET = 100000.0
 
 # ================= 1. 数据获取与预处理 =================
 def get_local_data(code_list, start_time):
@@ -193,7 +195,7 @@ rebalance_dates = [g.index[0] for _, g in df[_mask].groupby(df[_mask].index.to_p
 print(f">> 调仓日（每月 {REBALANCE_DAY} 号后首个交易日）: {[d.strftime('%Y-%m-%d') for d in rebalance_dates]}")
 
 # ================= 4. 模拟交易循环 =================
-cash                 = 1000000.0
+cash                 = BUDGET
 equity_positions     = {}   # {stock_code: shares}，等权持仓各个股
 etf_positions        = {etf: 0.0 for etf in DEFENSE_ETFS}
 hold_style           = None
@@ -314,10 +316,10 @@ for i in range(len(df)):
     portfolio_value.append(current_val)
 
 df['strategy_value'] = portfolio_value
-df['benchmark_value'] = (df['close_300'] / df['close_300'].iloc[0]) * 1000000
+df['benchmark_value'] = (df['close_300'] / df['close_300'].iloc[0]) * BUDGET
 
 # ================= 5. 指标输出与绘图 =================
-total_return = (df['strategy_value'].iloc[-1] / 1000000) - 1
+total_return = (df['strategy_value'].iloc[-1] / BUDGET) - 1
 max_drawdown = (df['strategy_value'] / df['strategy_value'].cummax() - 1).min()
 
 yearly_start     = df['strategy_value'].resample('YE').first()
