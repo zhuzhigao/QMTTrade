@@ -1,83 +1,207 @@
+import sys
+import os
 import pandas as pd
 import numpy as np
 import datetime
 import matplotlib.pyplot as plt
-from xtquant import xtdata  # 假设你在QMT环境下，直接用内置数据获取
+from xtquant import xtdata
+
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+from utils.stockmgr import StockMgr
 
 # ================= 可配置参数 =================
 DEFENSE_ETFS        = ['518880.SH', '513100.SH']  # 防御ETF列表，可自由增减，等权分配
-ENABLE_MONKEY_CHECK = True   # True: 启用猴市巡检（模块0）；False: 禁用，仅依赖月度动量+周度熔断
+STOCK_NUM           = 3      # 每次选股数量，与策略 stock_num 一致
+REBALANCE_DAY       = 10      # 每月第几个交易日调仓（1=首日，5=第5个交易日，以此类推）
+ENABLE_MONKEY_CHECK = True   # True: 启用猴市巡检（模块0）；False: 禁用
 SAVE_PLOT           = True   # True: 保存图表到文件；False: 仅显示不保存
-PLOT_DIR            = r'C:\Users\xiusan\OneDrive\Investment\QMTTrade\kj202509'  # 图表保存目录
+PLOT_DIR            = r'C:\Users\xiusan\OneDrive\Investment\QMTTrade\kj202509'
+
+START_TIME = '20230101'  # 回测起始日期
+END_TIME = '20260401'
 
 # ================= 1. 数据获取与预处理 =================
 def get_local_data(code_list, start_time):
-    # 从QMT获取数据 (需确保QMT已下载对应历史数据)
-    download_start_date = (datetime.datetime.strptime(start_time, "%Y%m%d") - datetime.timedelta(days=10)).strftime("%Y%m%d")
-    xtdata.download_history_data2(code_list, period='1d', start_time=download_start_date, end_time='')
+    # download_start = (datetime.datetime.strptime(start_time, "%Y%m%d") - datetime.timedelta(days=10)).strftime("%Y%m%d")
+    # xtdata.download_history_data2(code_list, period='1d', start_time=download_start, end_time=END_TIME)
     data = {}
     for code in code_list:
-        df = xtdata.get_market_data_ex([], [code], period='1d', start_time=start_time, dividend_type='front')
-        df = df[code].reset_index().rename(columns={'index': 'date'})
-        df['date'] = pd.to_datetime(df['date'])
-        data[code] = df.set_index('date')
+        raw = xtdata.get_market_data_ex([], [code], period='1d', start_time=start_time, dividend_type='front')
+        d = raw[code].reset_index().rename(columns={'index': 'date'})
+        d['date'] = pd.to_datetime(d['date'])
+        data[code] = d.set_index('date')
     return data
 
-# 2022年1月至今
-codes = ['000300.SH', '000852.SH'] + DEFENSE_ETFS
-raw_data = get_local_data(codes, '20230101')
+# 1a. 指数 + 防御ETF 日线
+codes    = ['000300.SH', '000852.SH'] + DEFENSE_ETFS
+raw_data = get_local_data(codes, START_TIME)
 
-# 对齐数据
 df = pd.DataFrame(index=raw_data['000300.SH'].index)
 df['close_300'] = raw_data['000300.SH']['close']
 df['close_852'] = raw_data['000852.SH']['close']
 
-# 为每个防御ETF动态建列，列名如 close_518880_SH
 etf_col = {etf: f"close_{etf.replace('.', '_')}" for etf in DEFENSE_ETFS}
 for etf, col in etf_col.items():
     df[col] = raw_data[etf]['close']
 
 df = df.ffill().dropna()
 
-# ================= 2. 策略逻辑计算 =================
-# 两个基准各自计算MA20，供周度熔断分别使用
+# 1b. 获取成分股池
+print(">> 获取成分股池...")
+stockmgr = StockMgr()
+pool_300 = stockmgr.query_stocks_in_sector('000300.SH')
+pool_852 = stockmgr.query_stocks_in_sector('000852.SH')
+all_stocks = list(set(pool_300 + pool_852))
+# print(f">> 股票池共 {len(all_stocks)} 只，开始下载历史日线...")
+
+# # 1c. 下载并加载所有个股历史收盘价，对齐至主日历
+# def _on_download(data):
+#     print(f"\r>> 下载进度: {data.get('finished', '?')}/{data.get('total', '?')}", end='', flush=True)
+
+# xtdata.download_history_data2(all_stocks, period='1d', start_time=START_TIME, end_time=END_TIME, callback=_on_download)
+# print()
+print(">> 加载个股收盘价...")
+stock_close = {}  # {code: Series, index=df.index}
+for stock in all_stocks:
+    raw = xtdata.get_market_data_ex(['close'], [stock], period='1d', start_time=START_TIME, dividend_type='front')
+    if stock in raw and not raw[stock].empty:
+        s = raw[stock]['close']
+        s.index = pd.to_datetime(s.index)
+        stock_close[stock] = s.reindex(df.index).ffill()
+
+# 1d. 批量加载财务数据（PershareIndex + Income），index = 公告日期
+print(">> 加载财务数据（耗时较长，请稍候）...")
+all_fin  = xtdata.get_financial_data(all_stocks, table_list=['PershareIndex', 'Income'],
+                                     start_time=START_TIME, end_time=END_TIME, report_type='announce_time')
+fin_data = {s: all_fin[s] for s in all_stocks if s in all_fin}
+
+# 1e. 加载个股基本信息（ST过滤用）
+details = {s: xtdata.get_instrument_detail(s) for s in all_stocks}
+print(">> 数据准备完成。\n")
+
+# ================= 2. 选股逻辑（复现 buy_a_shares + _filter_fundamentals）=================
+def select_stocks(style, as_of_date):
+    """
+    在 as_of_date 当天，用历史财务数据 + 历史价格复现基本面选股，返回个股列表。
+    注意：成分股使用今日池（存在幸存者偏差），财务数据 / 价格均取截至 as_of_date 最新值。
+    """
+    pool = pool_300 if style == 'BIG' else pool_852
+    ts   = pd.Timestamp(as_of_date)
+
+    # 剔除 ST / 退市
+    valid_pool = [
+        s for s in pool
+        if details.get(s)
+        and 'ST'  not in details[s].get('InstrumentName', '')
+        and '退'  not in details[s].get('InstrumentName', '')
+    ]
+
+    rows = {}
+    for stock in valid_pool:
+        fd = fin_data.get(stock)
+        if fd is None:
+            continue
+
+        pershare = fd.get('PershareIndex')
+        income   = fd.get('Income')
+        detail   = details.get(stock)
+        if pershare is None or income is None or detail is None:
+            continue
+
+        try:
+            pershare.index = pd.to_datetime(pershare.index)
+            income.index   = pd.to_datetime(income.index)
+        except Exception:
+            continue
+
+        # 防未来函数：只取公告日 <= as_of_date 的最新一期
+        ps_hist  = pershare[pershare.index <= ts]
+        inc_hist = income[income.index   <= ts]
+        if ps_hist.empty or inc_hist.empty:
+            continue
+
+        last_ps  = ps_hist.iloc[-1]
+        last_inc = inc_hist.iloc[-1]
+
+        eps     = last_ps.get('s_fa_eps_basic', None)
+        roe     = last_ps.get('equity_roe',     None)
+        dedu_np = last_inc.get('net_profit_incl_min_int_inc_after', None)
+
+        if any(v is None or pd.isna(v) for v in [eps, roe, dedu_np]):
+            continue
+
+        # 历史价格（截至 as_of_date 最后可用收盘价）
+        sc = stock_close.get(stock)
+        if sc is None:
+            continue
+        sc_hist = sc[sc.index <= ts].dropna()
+        if sc_hist.empty:
+            continue
+        price = sc_hist.iloc[-1]
+        if price <= 0:
+            continue
+
+        pe         = (price / eps) if eps != 0 else None
+        total_sh   = detail.get('TotalVolume', None)
+        market_cap = (price * total_sh) if total_sh else None
+
+        if pe is None or market_cap is None:
+            continue
+
+        rows[stock] = {'roe': roe, 'pe_ttm': pe, 'market_cap': market_cap, 'dedu_np': dedu_np}
+
+    if not rows:
+        print(f"  [select_stocks] {as_of_date.date()} 无有效财务数据，跳过建仓。")
+        return []
+
+    sdf = pd.DataFrame.from_dict(rows, orient='index').dropna()
+    sdf = sdf[sdf['dedu_np'] > 0]  # 扣非净利润必须 > 0
+
+    if style == 'BIG':
+        sdf = sdf[(sdf['roe'] > 10) & (sdf['pe_ttm'] > 0) & (sdf['pe_ttm'] < 30)]
+        sdf = sdf.sort_values('market_cap', ascending=False)
+    else:
+        sdf = sdf[sdf['roe'] > 15]
+        sdf = sdf.sort_values('market_cap', ascending=True)
+
+    result = sdf.index.tolist()[:STOCK_NUM]
+    print(f"  [select_stocks] {as_of_date.date()} {style} -> {result}")
+    return result
+
+# ================= 3. 策略指标计算 =================
 df['ma20_300'] = df['close_300'].rolling(20).mean()
 df['ma20_852'] = df['close_852'].rolling(20).mean()
 
-# 策略用count=21取iloc[-11]和iloc[-21]，对应10期和20期收益
 def calc_mom(series):
-    mom10 = series / series.shift(10) - 1
-    mom20 = series / series.shift(20) - 1
-    return 0.5 * mom10 + 0.5 * mom20
+    return 0.5 * (series / series.shift(10) - 1) + 0.5 * (series / series.shift(20) - 1)
 
 df['mom_300'] = calc_mom(df['close_300'])
 df['mom_852'] = calc_mom(df['close_852'])
 
-# 猴市判断（向量化复现 MarketMgr.is_monkey_market 逻辑，ENABLE_MONKEY_CHECK=False 时跳过）
-# MarketMgr 使用 count=window+1=21 个点：
-#   ER  = |close[-1] - close[0]| / sum(|daily_changes|)  →  20期净变化 / 20期绝对变化之和
-#   CV  = std(closes) / mean(closes)                      →  21点的变异系数
 if ENABLE_MONKEY_CHECK:
     _MONKEY_WINDOW = 20
-    _ER_THRESHOLD  = 0.25
-    _VOL_THRESHOLD = 0.015
     _c = df['close_300']
-    _net_change  = (_c - _c.shift(_MONKEY_WINDOW)).abs()
-    _sum_changes = _c.diff().abs().rolling(_MONKEY_WINDOW).sum()
-    _er          = (_net_change / _sum_changes.replace(0, np.nan)).fillna(0.0)
-    _cv          = _c.rolling(_MONKEY_WINDOW + 1).std() / _c.rolling(_MONKEY_WINDOW + 1).mean()
-    df['is_monkey'] = ((_er < _ER_THRESHOLD) & (_cv > _VOL_THRESHOLD)).fillna(False)
+    _er = ((_c - _c.shift(_MONKEY_WINDOW)).abs() /
+           _c.diff().abs().rolling(_MONKEY_WINDOW).sum().replace(0, np.nan)).fillna(0.0)
+    _cv = _c.rolling(_MONKEY_WINDOW + 1).std() / _c.rolling(_MONKEY_WINDOW + 1).mean()
+    df['is_monkey'] = ((_er < 0.25) & (_cv > 0.015)).fillna(False)
 else:
     df['is_monkey'] = False
 
-# ================= 3. 模拟交易循环 =================
-cash                  = 1000000.0
-equity_pos            = 0.0   # 权益持仓（大盘或小盘，以对应指数价格计）
-etf_positions         = {etf: 0.0 for etf in DEFENSE_ETFS}  # 各防御ETF持仓
-hold_style            = None  # 当前风格: 'BIG' | 'SMALL' | 'DEFENSE'
-last_rebalance_month  = -1    # 对应策略 monthly_adjusted_month，防止月内重复调仓
-portfolio_value       = []
-commissions_paid      = 0.0
+# 预计算每根K线是当月第几个交易日（1-based），用于 REBALANCE_DAY 门控
+df['trading_day_of_month'] = df.groupby(df.index.to_period('M')).cumcount() + 1
+
+rebalance_dates = df[df['trading_day_of_month'] == REBALANCE_DAY].index
+print(f">> 调仓日（每月第 {REBALANCE_DAY} 个交易日）: {[d.strftime('%Y-%m-%d') for d in rebalance_dates]}")
+
+# ================= 4. 模拟交易循环 =================
+cash                 = 1000000.0
+equity_positions     = {}   # {stock_code: shares}，等权持仓各个股
+etf_positions        = {etf: 0.0 for etf in DEFENSE_ETFS}
+hold_style           = None
+last_rebalance_month = -1
+portfolio_value      = []
+commissions_paid     = 0.0
 
 for i in range(len(df)):
     today     = df.index[i]
@@ -88,18 +212,17 @@ for i in range(len(df)):
     ma20_300  = df['ma20_300'].iloc[i]
     ma20_852  = df['ma20_852'].iloc[i]
 
-    # 当前各防御ETF价格
-    etf_prices = {etf: df[col].iloc[i] for etf, col in etf_col.items()}
+    etf_prices    = {etf: df[col].iloc[i] for etf, col in etf_col.items()}
+    is_friday            = today.weekday() == 4
+    is_monkey            = df['is_monkey'].iloc[i]
+    current_month        = today.month
+    trading_day_of_month = df['trading_day_of_month'].iloc[i]
 
-    is_friday     = today.weekday() == 4
-    is_monkey     = df['is_monkey'].iloc[i]
-    current_month = today.month
-
-    # 模块0：猴市巡检 — 猴市时强制 DEFENSE，同时挂起月度/周度模块（is_paused=True）
+    # 模块0：猴市巡检
     if ENABLE_MONKEY_CHECK and is_monkey:
         target_style = 'DEFENSE'
     else:
-        # 模块2：周五熔断，使用当前风格对应的基准指数，优先于月度调仓
+        # 模块2：周五熔断
         if hold_style == 'SMALL':
             circuit_breaker = is_friday and (close_852 < ma20_852)
         else:
@@ -107,9 +230,10 @@ for i in range(len(df)):
 
         if circuit_breaker:
             target_style = 'DEFENSE'
-        elif current_month != last_rebalance_month and not (pd.isna(mom_300) or pd.isna(mom_852)):
-            # 模块1：月度动量研判 — 每月首个交易日执行一次，与策略 monthly_adjusted_month 门控一致
-            # pd.isna 守护：预热期（前20根K线）动量为NaN时跳过，等数据足够再研判
+        elif (current_month != last_rebalance_month
+              and trading_day_of_month >= REBALANCE_DAY
+              and not (pd.isna(mom_300) or pd.isna(mom_852))):
+            # 模块1：月度动量研判 — 每月第 REBALANCE_DAY 个交易日（或之后首个可用日）触发
             if mom_300 < 0 and mom_852 < 0:
                 target_style = 'DEFENSE'
             elif mom_300 >= mom_852:
@@ -118,88 +242,96 @@ for i in range(len(df)):
                 target_style = 'SMALL'
             last_rebalance_month = current_month
         else:
-            target_style = hold_style  # 月内非熔断日：维持现状，不重新研判
+            target_style = hold_style
 
     # 模拟调仓
     if target_style != hold_style:
         date_str = today.strftime("%Y-%m-%d")
 
-        # 1. 清仓全部当前持仓
-        if equity_pos > 0:
-            eq_code  = '000852.SH' if hold_style == 'SMALL' else '000300.SH'
-            eq_price = close_852   if hold_style == 'SMALL' else close_300
-            sell_amount = equity_pos * eq_price
+        # 1. 清仓个股持仓（含印花税 0.1%，ETF 免印花税）
+        for stock, shares in equity_positions.items():
+            if shares <= 0:
+                continue
+            sc    = stock_close.get(stock)
+            price = sc.iloc[i] if sc is not None and not pd.isna(sc.iloc[i]) else None
+            if price is None or price <= 0:
+                continue
+            sell_amount  = shares * price
+            fee          = max(sell_amount * 0.0001, 5.0) + sell_amount * 0.001  # 佣金 + 印花税
+            cash += sell_amount - fee
+            commissions_paid += fee
+            print(f"[{date_str}] SELL  {stock:<12}  shares={shares:>10.2f}  price={price:>8.3f}  amount={sell_amount:>12.2f}  fee={fee:>7.2f}")
+        equity_positions = {}
+
+        # 2. 清仓防御ETF持仓
+        for etf in DEFENSE_ETFS:
+            if etf_positions[etf] <= 0:
+                continue
+            sell_amount = etf_positions[etf] * etf_prices[etf]
             fee = max(sell_amount * 0.0001, 5.0)
             cash += sell_amount - fee
             commissions_paid += fee
-            print(f"[{date_str}] SELL  {eq_code:<12}  shares={equity_pos:>12.2f}  price={eq_price:>8.3f}  amount={sell_amount:>12.2f}  fee={fee:>7.2f}")
-            equity_pos = 0.0
+            print(f"[{date_str}] SELL  {etf:<12}  shares={etf_positions[etf]:>10.2f}  price={etf_prices[etf]:>8.3f}  amount={sell_amount:>12.2f}  fee={fee:>7.2f}")
+            etf_positions[etf] = 0.0
 
-        for etf in DEFENSE_ETFS:
-            if etf_positions[etf] > 0:
-                sell_amount = etf_positions[etf] * etf_prices[etf]
-                fee = max(sell_amount * 0.0001, 5.0)
-                cash += sell_amount - fee
-                commissions_paid += fee
-                print(f"[{date_str}] SELL  {etf:<12}  shares={etf_positions[etf]:>12.2f}  price={etf_prices[etf]:>8.3f}  amount={sell_amount:>12.2f}  fee={fee:>7.2f}")
-                etf_positions[etf] = 0.0
+        # 3. 买入目标
+        if target_style in ('BIG', 'SMALL'):
+            target_list = select_stocks(target_style, today)
+            if target_list:
+                cash_per_stock = cash * 0.98 / len(target_list)
+                for stock in target_list:
+                    sc    = stock_close.get(stock)
+                    price = sc.iloc[i] if sc is not None and not pd.isna(sc.iloc[i]) else None
+                    if price is None or price <= 0:
+                        continue
+                    fee    = max(cash_per_stock * 0.0001, 5.0)
+                    shares = (cash_per_stock - fee) / price
+                    cash  -= cash_per_stock
+                    equity_positions[stock] = shares
+                    commissions_paid += fee
+                    print(f"[{date_str}] BUY   {stock:<12}  shares={shares:>10.2f}  price={price:>8.3f}  amount={cash_per_stock:>12.2f}  fee={fee:>7.2f}")
+            else:
+                # 选股为空：维持 DEFENSE（与策略"维持原状"对齐）
+                target_style = hold_style if hold_style else 'DEFENSE'
 
-        # 2. 买入目标
-        if target_style == 'BIG':
-            buy_amount = cash
-            fee = max(buy_amount * 0.0001, 5.0)
-            cash -= buy_amount
-            equity_pos = (buy_amount - fee) / close_300
-            commissions_paid += fee
-            print(f"[{date_str}] BUY   {'000300.SH':<12}  shares={equity_pos:>12.2f}  price={close_300:>8.3f}  amount={buy_amount:>12.2f}  fee={fee:>7.2f}")
-
-        elif target_style == 'SMALL':
-            buy_amount = cash
-            fee = max(buy_amount * 0.0001, 5.0)
-            cash -= buy_amount
-            equity_pos = (buy_amount - fee) / close_852
-            commissions_paid += fee
-            print(f"[{date_str}] BUY   {'000852.SH':<12}  shares={equity_pos:>12.2f}  price={close_852:>8.3f}  amount={buy_amount:>12.2f}  fee={fee:>7.2f}")
-
-        else:  # DEFENSE: 等权买入所有防御ETF
+        else:  # DEFENSE: 等权买入防御ETF
             per_etf_cash = cash / len(DEFENSE_ETFS)
             for etf in DEFENSE_ETFS:
                 fee = max(per_etf_cash * 0.0001, 5.0)
                 cash -= per_etf_cash
                 etf_positions[etf] = (per_etf_cash - fee) / etf_prices[etf]
                 commissions_paid += fee
-                print(f"[{date_str}] BUY   {etf:<12}  shares={etf_positions[etf]:>12.2f}  price={etf_prices[etf]:>8.3f}  amount={per_etf_cash:>12.2f}  fee={fee:>7.2f}")
+                print(f"[{date_str}] BUY   {etf:<12}  shares={etf_positions[etf]:>10.2f}  price={etf_prices[etf]:>8.3f}  amount={per_etf_cash:>12.2f}  fee={fee:>7.2f}")
 
         print(f"[{date_str}] >> {hold_style or 'INIT'} -> {target_style}  cash_after={cash:>12.2f}")
         hold_style = target_style
 
-    # 各资产使用各自实际价格计算净值
-    eq_price = close_852 if hold_style == 'SMALL' else close_300
-    etf_val = sum(etf_positions[etf] * etf_prices[etf] for etf in DEFENSE_ETFS)
-    current_val = cash + equity_pos * eq_price + etf_val
+    # 计算当日净值
+    equity_val = sum(
+        equity_positions[s] * (stock_close[s].iloc[i] if stock_close.get(s) is not None and not pd.isna(stock_close[s].iloc[i]) else 0)
+        for s in equity_positions
+    )
+    etf_val    = sum(etf_positions[etf] * etf_prices[etf] for etf in DEFENSE_ETFS)
+    current_val = cash + equity_val + etf_val
     portfolio_value.append(current_val)
 
 df['strategy_value'] = portfolio_value
 df['benchmark_value'] = (df['close_300'] / df['close_300'].iloc[0]) * 1000000
 
-# ================= 4. 指标输出与绘图 =================
+# ================= 5. 指标输出与绘图 =================
 total_return = (df['strategy_value'].iloc[-1] / 1000000) - 1
 max_drawdown = (df['strategy_value'] / df['strategy_value'].cummax() - 1).min()
 
-# 逐年收益：每年首末交易日收盘价计算
-yearly_start = df['strategy_value'].resample('YE').first()
-yearly_end   = df['strategy_value'].resample('YE').last()
-yearly_return = (yearly_end / yearly_start - 1).rename('strategy')
-
-bm_yearly_start = df['benchmark_value'].resample('YE').first()
-bm_yearly_end   = df['benchmark_value'].resample('YE').last()
-bm_yearly_return = (bm_yearly_end / bm_yearly_start - 1).rename('benchmark')
-
+yearly_start     = df['strategy_value'].resample('YE').first()
+yearly_end       = df['strategy_value'].resample('YE').last()
+yearly_return    = (yearly_end / yearly_start - 1).rename('strategy')
+bm_yearly_return = ((df['benchmark_value'].resample('YE').last() /
+                     df['benchmark_value'].resample('YE').first()) - 1).rename('benchmark')
 avg_yearly_return = yearly_return.mean()
 
-print(f"--- 回测结果 (2022-至今) ---")
-print(f"防御ETF: {DEFENSE_ETFS}")
-print(f"注意：日内个股8%止损（模块3）未纳入回测，实盘表现可能略有偏差。")
+print(f"\n--- 回测结果 ({START_TIME[:4]}-至今) ---")
+print(f"防御ETF: {DEFENSE_ETFS}  |  每次选股: {STOCK_NUM} 只")
+print(f"注意: 成分股使用今日池（幸存者偏差），日内个股止损（模块3）未纳入。")
 print(f"最终收益率:   {total_return:.2%}")
 print(f"最大回撤:     {max_drawdown:.2%}")
 print(f"累计手续费:   {commissions_paid:.2f} 元")
@@ -208,24 +340,19 @@ print(f"")
 print(f"{'年份':<6}  {'策略收益':>10}  {'沪深300':>10}")
 print(f"{'------':<6}  {'----------':>10}  {'----------':>10}")
 for year in yearly_return.index:
-    y     = year.year
-    strat = yearly_return.loc[year]
-    bm    = bm_yearly_return.loc[year] if year in bm_yearly_return.index else float('nan')
-    print(f"{y:<6}  {strat:>10.2%}  {bm:>10.2%}")
+    bm = bm_yearly_return.loc[year] if year in bm_yearly_return.index else float('nan')
+    print(f"{year.year:<6}  {yearly_return.loc[year]:>10.2%}  {bm:>10.2%}")
 
-plt.figure(figsize=(12,6))
+plt.figure(figsize=(12, 6))
 plt.plot(df['strategy_value'], label='My All-Weather Strategy')
 plt.plot(df['benchmark_value'], label='Benchmark (HS300)', linestyle='--')
-plt.title('Backtest Result: 2022-Now')
+plt.title('Backtest Result')
 plt.legend()
 plt.grid(True)
 
 if SAVE_PLOT:
-    import os
-    ts = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
-    path = os.path.join(PLOT_DIR, f"regression_nomonkey.png")
-    if ENABLE_MONKEY_CHECK:
-        path = os.path.join(PLOT_DIR, f"regression_withmonkey.png")
+    fname = "regression_withmonkey.png" if ENABLE_MONKEY_CHECK else "regression_nomonkey.png"
+    path  = os.path.join(PLOT_DIR, fname)
     plt.savefig(path, dpi=150, bbox_inches='tight')
     print(f"图表已保存: {path}")
 
