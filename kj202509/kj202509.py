@@ -46,6 +46,7 @@ class AllWeatherStrategy:
         self.benchmark_big = '000300.SH'                # 大盘动量基准
         self.benchmark_small = '000852.SH'              # 小盘动量基准
         self.foreign_etf = ['518880.SH', '513100.SH']  # 防御外盘ETF：黄金、纳指
+        self.rebalance_day = 1                         # 每月几号之后才允许调仓（自然日，首个满足条件的交易日触发）
 
         # --- 核心时间节点 ---
         self.stop_loss_time = "14:45:00"
@@ -137,8 +138,8 @@ class AllWeatherStrategy:
         if DEBUG or (current_time >= "09:31:00" and self.monkey_check_date != current_date):
             self._check_monkey_market(current_date)
 
-        # 模块 1：月度动量调仓 (每月第一个交易日 09:35)
-        if DEBUG or (current_time >= "09:35:00" and self.monthly_adjusted_month != current_month and not self.is_paused):
+        # 模块 1：月度动量调仓 (每月 rebalance_day 号之后首个交易日 09:35)
+        if DEBUG or (current_time >= "09:35:00" and self.monthly_adjusted_month != current_month and now.day >= self.rebalance_day and not self.is_paused):
             self._monthly_rebalance(current_month)
 
         # 模块 2：周度熔断观察 (每周五 14:30)
