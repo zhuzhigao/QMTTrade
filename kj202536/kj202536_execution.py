@@ -323,20 +323,41 @@ class RobotTrader:
                 except Exception as e:
                     print(f"  -> {code} 卖出订单报错: {e}")
 
-        time.sleep(20) # 等待卖出订单成交、资金释放
+        # 轮询等待卖出单成交，最多等 120 秒，避免 sleep(20) 的固定盲等
+        if sell_records and not DEBUG:
+            sold_codes = {
+                code for code in current_holdings.keys()
+                if code not in target_list and current_holdings[code] > 0
+            }
+            deadline = datetime.datetime.now(BEIJING_TZ) + datetime.timedelta(seconds=120)
+            print(f"  -> 等待卖出成交: {sold_codes}")
+            while datetime.datetime.now(BEIJING_TZ) < deadline:
+                time.sleep(3)
+                positions = self.trader.query_stock_positions(self.acc)
+                still_holding = {
+                    p.stock_code for p in positions
+                    if p.stock_code in sold_codes and p.volume > 0
+                }
+                if not still_holding:
+                    print(f"  -> 卖出已全部成交。")
+                    break
+                print(f"  -> 仍有持仓未清: {still_holding}，继续等待...")
+            else:
+                print(f"  !! 超时 120 秒仍有未成交卖单，继续执行买入（可用现金以实际为准）。")
 
         # 卖出结算后再查资产，确保可用资金已更新
         asset = self.trader.query_stock_asset(self.acc)
-        total_asset = min(asset.total_asset, Config.policy_asset)
-        print(f"账户总资产: {asset.total_asset:.2f} | 本策略实际分配额度: {total_asset:.2f}")
+        available_cash = min(asset.cash, Config.policy_asset)  # 用实际可用现金，而非含持仓市值的总资产
+        print(f"账户总资产: {asset.total_asset:.2f} | 可用现金: {asset.cash:.2f} | 本策略实际分配额度: {available_cash:.2f}")
 
-        # B. 买入目标 (按总资产比例)
-        weight = 1.0 / len(target_list)
-        for code in target_list:
-            if code in current_holdings.keys():
-                 print(f"当前已经持仓 {code}：跳过买入")
-                 continue
-            target_value = total_asset * weight
+        # B. 买入目标 (按可用现金等权分配)
+        buy_targets = [code for code in target_list if code not in current_holdings]
+        if not buy_targets:
+            print("所有目标均已持仓，无需买入。")
+            return
+        weight = 1.0 / len(buy_targets)
+        for code in buy_targets:
+            target_value = available_cash * weight
             print(f"【调整计划】{code} | 目标价值: {target_value:.2f}")
             
             try:
