@@ -32,7 +32,10 @@ class MyCallback(XtQuantTraderCallback):
     def on_stock_trade(self, trade):
         print(f">> 成交回报: 代码:{trade.stock_code}, 成交量:{trade.traded_volume}, 成交价:{trade.traded_price}")
 
-
+def download_data(stock_list, period, start_time, end_time, callback = None):
+     time.sleep(1)
+     xtdata.download_history_data2(stock_list, period=period, start_time=start_time, end_time=end_time, callback=callback)
+     
 # ================= 2. 策略核心逻辑类 =================
 class AllWeatherStrategy:
 
@@ -175,7 +178,9 @@ class AllWeatherStrategy:
         print(f"执行月度动量研判与调仓...")
         try:
             start_date = (datetime.datetime.now(BEIJING_TZ) - datetime.timedelta(days=30)).strftime("%Y%m%d")
+            print('start download index data')
             xtdata.download_history_data2([self.benchmark_big, self.benchmark_small], period='1d', start_time=start_date, end_time='')
+            print('index data downloade')
             big_data = xtdata.get_market_data(['close'], [self.benchmark_big], '1d', count=21, dividend_type='front')
             small_data = xtdata.get_market_data(['close'], [self.benchmark_small], '1d', count=21, dividend_type='front')
 

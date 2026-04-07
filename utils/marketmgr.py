@@ -1,6 +1,7 @@
 __all__ = ['MarketMgr']
 
 import datetime
+import time
 import numpy as np
 from scipy import stats
 from datetime import timezone, timedelta
@@ -27,6 +28,7 @@ class MarketMgr:
         - bool: True 表示处于猴市，False 表示非猴市（趋势市或极低波动的死市）
         """
         # 1. 补充下载最近的日线数据 (防止本地数据缺失)
+        time.sleep(1)
         xtdata.download_history_data2([stock_code], '1d', '20260101', '')
 
         # 2. 从本地缓存获取最近 window + 1 天的收盘价
