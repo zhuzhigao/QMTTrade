@@ -237,7 +237,9 @@ class RobotTrader:
             start_date = (datetime.datetime.now(BEIJING_TZ) - datetime.timedelta(days=Config.rsrs_m + Config.rsrs_n)).strftime("%Y%m%d")
             today_str_dl = datetime.datetime.now(BEIJING_TZ).strftime("%Y%m%d")
             xtdata.download_history_data2(safe_pool, period='1d', start_time=start_date, end_time='')
+            time.sleep(1)
             xtdata.download_history_data2(safe_pool, period='1m', start_time=today_str_dl, end_time='')
+            time.sleep(1)
 
             scores = []
 

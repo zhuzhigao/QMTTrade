@@ -287,7 +287,7 @@ def download_xtquant_data():
     pool1  = mgr.query_stocks_in_sector('000300.SH')
     pool2 = mgr.query_stocks_in_sector('000852.SH')
     pool = list(pool1) + list(pool2) + ['000300.SH', '000852.SH']
-    xtdata.download_history_data2(pool, period='1d', start_time='20240101', end_time='', callback=lambda res: print(f">> 股票数据下载进度: {res}"))
+    xtdata.download_history_data2(pool, period='1d', start_time='20260101', end_time='', callback=lambda res: print(f">> 股票数据下载进度: {res}"))
     time.sleep(5)
     xtdata.download_financial_data2(pool, table_list=['PershareIndex','Income', 'Capital'], start_time='20250930',
                                      callback=lambda res: print(f">> 财务数据下载进度: {res}"))
