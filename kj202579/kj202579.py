@@ -21,6 +21,7 @@ if parent_dir not in sys.path:
     sys.path.append(parent_dir)
 
 from utils.utilities import StrategyLedger, BlacklistManager
+from utils.trademgr import TradeMgr
 # ================= 1. 全局配置与参数 =================
 BEIJING_TZ = timezone(timedelta(hours=8))
 class Config:
@@ -332,17 +333,20 @@ def adjust_positions(trader, account, target_list):
     strategy_holdings = [code for code in hold_list if code in GlobalVar.strategy_ledger.get_all()]
     sell_list = [code for code in strategy_holdings if code not in target_list]
 
-    has_sell_order = False  # 新增标签
+    has_sell_order = False
+    sold_targets   = {}   # {stock_code: pre_sell_market_value}，用于轮询确认成交
     # 1. 卖出不在目标列表中的股票
     for p in positions:
         if p.volume > 0 and p.stock_code in sell_list:
             print(f"调仓卖出: {p.stock_code}")
             if order_target_volume(trader, account, p.stock_code, 0, 0, 'rebalance_sell'):
                 has_sell_order = True
-            
+                sold_targets[p.stock_code] = p.market_value
+
     if has_sell_order:
-        print("已发送卖出指令，等待 120 秒确认成交释放资金...")
-        time.sleep(120) 
+        print("已发送卖出指令，轮询等待成交确认...")
+        if not DEBUG:
+            TradeMgr.wait_for_sells(trader, account, sold_targets, timeout=120, interval=5)
 
     #重新获取 positions
     positions = trader.query_stock_positions(account)

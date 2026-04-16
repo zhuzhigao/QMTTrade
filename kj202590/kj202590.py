@@ -31,6 +31,7 @@ from xtquant.xttype import StockAccount
 import xtquant.xtconstant as xtconstant
 
 from utils.utilities import StrategyLedger, MessagePusher
+from utils.trademgr import TradeMgr
 
 # ================= 1. 全局配置 =================
 
@@ -161,41 +162,9 @@ def download_etf_data():
     print(f"[行情] 下载 ETF 历史数据: {etf_list}")
     try:
         xtdata.download_history_data2(etf_list, period='1d', start_time=start_str, end_time='')
+        time.sleep(1)
     except Exception as e:
         print(f"[警告] 行情下载异常（非致命）: {e}")
-
-
-def _wait_for_sells(trader: XtQuantTrader, account: StockAccount,
-                    sold_targets: dict, timeout: int = 120, interval: int = 5):
-    """
-    轮询持仓，直到所有卖出标的的市值已低于卖前水位（视为成交），或超时退出。
-    :param sold_targets: {stock_code: pre_sell_market_value}
-    :param timeout:      最长等待秒数（默认 120 秒）
-    :param interval:     轮询间隔秒数（默认 5 秒）
-    """
-    deadline = time.time() + timeout
-    pending  = set(sold_targets.keys())
-
-    while pending and time.time() < deadline:
-        time.sleep(interval)
-        positions = trader.query_stock_positions(account)
-        pos_map   = {p.stock_code: p for p in positions if p.volume > 0}
-
-        confirmed = set()
-        for code in pending:
-            pre_value   = sold_targets[code]
-            cur_value   = pos_map[code].market_value if code in pos_map else 0.0
-            # 市值下降超过 5%，认为卖单已部分或全部成交
-            if cur_value < pre_value * 0.95:
-                print(f"  [✓ 成交确认] {code} 市值: {pre_value:,.0f} → {cur_value:,.0f}")
-                confirmed.add(code)
-
-        pending -= confirmed
-
-    if pending:
-        print(f"  [超时警告] 以下品种卖单在 {timeout}s 内未完全确认成交，继续执行买入: {pending}")
-    else:
-        print(f"  [轮询完成] 所有卖出均已确认成交。")
 
 
 def estimated_buy_cost(shares: int, price: float) -> float:
@@ -391,7 +360,7 @@ def rebalance(trader: XtQuantTrader, account: StockAccount):
     if has_sell:
         print("\n[再平衡] 已发送卖出指令，轮询等待成交确认...")
         if not DEBUG:
-            _wait_for_sells(trader, account, sold_targets, timeout=120, interval=5)
+            TradeMgr.wait_for_sells(trader, account, sold_targets, timeout=120, interval=5)
 
     # ── 第二轮：执行买入 ──────────────────────────────────────────
     # 重新查询可用资金（卖出可能已到账）

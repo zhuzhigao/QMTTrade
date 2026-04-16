@@ -17,6 +17,7 @@ if parent_dir not in sys.path:
 from utils.utilities import StrategyLedger, StateManager
 from utils.stockmgr import StockMgr
 from utils.marketmgr import MarketMgr
+from utils.trademgr import TradeMgr
 
 BEIJING_TZ = timezone(timedelta(hours=8))
 DEBUG = True
@@ -287,6 +288,7 @@ class AllWeatherStrategy:
 
         # 1. 卖出本策略持有的、非目标 ETF 的持仓
         positions = self.trader.query_stock_positions(self.account)
+        sold_targets = {}
         if positions:
             for pos in positions:
                 if pos.can_use_volume > 0 and pos.stock_code not in self.foreign_etf and self.ledger.is_in_ledger(pos.stock_code):
@@ -298,9 +300,10 @@ class AllWeatherStrategy:
                         )
                     if seq != -1:
                         self.ledger.remove(pos.stock_code)
+                        sold_targets[pos.stock_code] = pos.market_value
 
-        if not DEBUG:
-            time.sleep(20)
+        if not DEBUG and sold_targets:
+            TradeMgr.wait_for_sells(self.trader, self.account, sold_targets, timeout=120, interval=5)
 
         # 2. 获取最新可用资金
         asset = self.trader.query_stock_asset(self.account)
@@ -362,6 +365,7 @@ class AllWeatherStrategy:
         # 4.1 卖出不在 target_list 中的持仓
         positions = self.trader.query_stock_positions(self.account)
         hold_codes = []
+        sold_targets = {}
         if positions:
             for pos in positions:
                 if self.ledger.is_in_ledger(pos.stock_code):
@@ -375,8 +379,9 @@ class AllWeatherStrategy:
                         )
                     if seq != -1:
                         self.ledger.remove(pos.stock_code)
-        if not DEBUG:
-            time.sleep(20)
+                        sold_targets[pos.stock_code] = pos.market_value
+        if not DEBUG and sold_targets:
+            TradeMgr.wait_for_sells(self.trader, self.account, sold_targets, timeout=120, interval=5)
 
         # 4.2 买入新目标
         asset = self.trader.query_stock_asset(self.account)
