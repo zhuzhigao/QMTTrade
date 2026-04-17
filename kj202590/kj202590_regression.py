@@ -11,12 +11,15 @@ kj202590_regression.py — 固收+ ETF 再平衡策略回测
 
 import sys
 import os
+import time
 import pandas as pd
 import numpy as np
 import matplotlib
 matplotlib.use('Agg')
 import matplotlib.pyplot as plt
 import matplotlib.ticker as mticker
+matplotlib.rcParams['font.sans-serif'] = ['Microsoft YaHei', 'SimHei', 'SimSun', 'DejaVu Sans']
+matplotlib.rcParams['axes.unicode_minus'] = False   # 修复负号显示为方块的问题
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
@@ -41,13 +44,21 @@ COMMISSION          = 0.0002        # 单边佣金率（万分之二）
 MIN_COMMISSION      = 5.0           # 最低佣金（元）
 SLIPPAGE            = 0.002         # 单边滑点率
 
-START_TIME          = '20200101'
+START_TIME          = '20240101'
 END_TIME            = '20260401'
 
 SAVE_PLOT           = True
 PLOT_DIR            = os.path.dirname(os.path.abspath(__file__))
 
 # ================= 1. 数据加载 =================
+
+def download_etf_data(codes, start_time, end_time):
+    """从 QMT 服务端下载 ETF 历史日线到本地缓存"""
+    print(f">> 下载历史日线: {codes}  ({start_time} — {end_time})")
+    xtdata.download_history_data2(codes, period='1d', start_time=start_time, end_time=end_time)
+    time.sleep(1)
+    print(">> 下载完成。")
+
 
 def load_etf_data(codes, start_time, end_time):
     """从 QMT 本地缓存加载 ETF 日线，返回对齐后的 DataFrame（index=date）"""
@@ -69,8 +80,12 @@ def load_etf_data(codes, start_time, end_time):
     df = df.ffill().dropna()
     return df
 
+etf_codes = list(WEIGHTS.keys()) + [BENCHMARK]
+etf_codes = list(dict.fromkeys(etf_codes))   # 去重，保持顺序
+
+download_etf_data(etf_codes, START_TIME, END_TIME)
+
 print(">> 加载 ETF 日线数据...")
-etf_codes = list(WEIGHTS.keys())
 df = load_etf_data(etf_codes, START_TIME, END_TIME)
 print(f">> 数据加载完成：{len(df)} 个交易日，{df.index[0].date()} — {df.index[-1].date()}\n")
 
