@@ -230,7 +230,7 @@ class RobotTrader:
         target_list = []
         if z > Config.buy_threshold:
             # 进攻模式
-            if not is_monday:
+            if not is_monday and not DEBUG:
                 print(f"信号: 进攻 | 今日非周一调仓日，动量不变，保持当前持仓装死。")
                 return # 不是周一，直接退出函数，不进行换仓
             

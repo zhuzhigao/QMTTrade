@@ -74,8 +74,8 @@ class MarketMgr:
         """
         print(f"正在计算 {index_code} 的 RSRS 信号...")
         start_date = (datetime.datetime.now(BEIJING_TZ) - datetime.timedelta(days=rsrs_m + rsrs_n)).strftime("%Y%m%d")
-        StockMgr.download_history([index_code], start_time=start_date, period='1d')
-        StockMgr.download_history([index_code], start_time=datetime.datetime.now(BEIJING_TZ).strftime("%Y%m%d"), period='1m')
+        StockMgr.download_history([index_code], start_time=start_date, period='1d', showprogress=True)
+        StockMgr.download_history([index_code], start_time=datetime.datetime.now(BEIJING_TZ).strftime("%Y%m%d"), period='1m', showprogress=True)
 
         data = xtdata.get_market_data_ex(['high', 'low'], [index_code], period='1d', count=rsrs_m + rsrs_n, dividend_type='front')[index_code]
         highs = data['high'].values

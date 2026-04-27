@@ -81,7 +81,7 @@ class StockMgr:
             if showprogress:
                 print(f"[{i}/{total}] 下载 {code} {period} {start_time}~{end_time or 'now'} ...", end=' ', flush=True)
             callback = (lambda res: print(f"进度: {res}")) if showprogress else None
-            xtdata.download_history_data(code, period=period, start_time=start_time, end_time=end_time, callback=callback)
+            xtdata.download_history_data(code, period=period, start_time=start_time, end_time=end_time)
             if showprogress:
                 print("完成")
             if pause:
