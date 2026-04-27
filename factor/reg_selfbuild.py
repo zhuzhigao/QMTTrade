@@ -83,7 +83,7 @@ def run_professional_backtest():
             # 传入当前的 dt_str，让 select 函数只用今天之前的数据
             try:
                 selected_df = select(stock_pool=STOCK_POOL, at_date=dt_str, sector= False, top_n=10, download=False, 
-                                     sentiment=MarketMgr().get_market_sentiment(BENCHMARK, dt_str), output= False)
+                                     sentiment=MarketMgr.get_market_sentiment(BENCHMARK, dt_str), output= False)
                 top_targets = selected_df.index.tolist()[:BUYIN_COUNT]
             except Exception as e:
                 print(f"[{dt_str}] 选股出错: {e}")

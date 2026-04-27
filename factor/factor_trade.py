@@ -73,7 +73,7 @@ def order_stock(xt_trader: XtQuantTrader, acc, stock, order_type, order_volume, 
 def run_strategy():  
     tradedate = datetime.date.today().strftime('%Y%m%d')
     #tradedate = '20250101'
-    sentiment = MarketMgr().get_market_sentiment(BENCHMARK, tradedate, SHORTTERM_DAYS)
+    sentiment = MarketMgr.get_market_sentiment(BENCHMARK, tradedate, SHORTTERM_DAYS)
     download = False
     if download:
         print('稳固IPC通道：10s')

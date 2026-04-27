@@ -15,10 +15,17 @@
 # BIAS (乖离率)。逻辑：数值越小（越接近均线）越好（防追高）。
 
 # -*- coding: utf-8 -*-
+import sys
+import os
 import datetime
 import pandas as pd
 import numpy as np
 from xtquant import xtdata
+
+_parent_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+if _parent_dir not in sys.path:
+    sys.path.append(_parent_dir)
+from utils.stockmgr import StockMgr
 
 # 权重配置
 W_FUND = 0.4  # 基本面
@@ -60,7 +67,7 @@ def check_and_download_data(stock_list, mdays = 60):
     print(f">> 正在下载行情数据 (从 {start_date} 开始)...")
     
     # 修复点：使用循环逐个下载
-    xtdata.download_history_data2(stock_list + ['000001.SH', '000300.SH'], period='1d', start_time=start_date, end_time='', callback=progress_callback)
+    StockMgr.download_history(stock_list + ['000001.SH', '000300.SH'], start_time=start_date, period='1d', showprogress=True)
     
     print(">> 正在下载财务数据...")
     # 财务数据通常支持列表下载，但如果也报错，同样改为循环

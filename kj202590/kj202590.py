@@ -31,6 +31,7 @@ from xtquant.xttype import StockAccount
 import xtquant.xtconstant as xtconstant
 
 from utils.utilities import StrategyLedger, MessagePusher
+from utils.stockmgr import StockMgr
 from utils.trademgr import TradeMgr
 
 # ================= 1. 全局配置 =================
@@ -161,8 +162,7 @@ def download_etf_data():
     start_str = (datetime.datetime.now(BEIJING_TZ) - datetime.timedelta(days=5)).strftime('%Y%m%d')
     print(f"[行情] 下载 ETF 历史数据: {etf_list}")
     try:
-        xtdata.download_history_data2(etf_list, period='1d', start_time=start_str, end_time='')
-        time.sleep(1)
+        StockMgr.download_history(etf_list, start_time=start_str, period='1d')
     except Exception as e:
         print(f"[警告] 行情下载异常（非致命）: {e}")
 

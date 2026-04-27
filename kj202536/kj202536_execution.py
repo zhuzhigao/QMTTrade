@@ -29,6 +29,7 @@ if parent_dir not in sys.path:
 
 from utils.utilities import MessagePusher
 from utils.marketmgr import MarketMgr
+from utils.stockmgr import StockMgr
 
 BEIJING_TZ = timezone(timedelta(hours=8))
 DEBUG = False
@@ -219,7 +220,7 @@ class RobotTrader:
         is_monday = (bj_now.weekday() == 0)
 
         # 1. 计算择时
-        z = MarketMgr().get_rsrs_signal(Config.index_code, Config.rsrs_n, Config.rsrs_m)
+        z = MarketMgr.get_rsrs_signal(Config.index_code, Config.rsrs_n, Config.rsrs_m)
         print(f"当前 RSRS Z-Score: {z:.2f}")
 
         # 2. 选股与过滤
@@ -234,13 +235,11 @@ class RobotTrader:
                 return # 不是周一，直接退出函数，不进行换仓
             
             
-            # 批量预下载所有ETF历史数据，避免在循环内逐只下载
+            # 逐只下载ETF历史数据
             start_date = (datetime.datetime.now(BEIJING_TZ) - datetime.timedelta(days=Config.rsrs_m + Config.rsrs_n)).strftime("%Y%m%d")
             today_str_dl = datetime.datetime.now(BEIJING_TZ).strftime("%Y%m%d")
-            xtdata.download_history_data2(safe_pool, period='1d', start_time=start_date, end_time='')
-            time.sleep(5)
-            xtdata.download_history_data2(safe_pool, period='1m', start_time=today_str_dl, end_time='')
-            time.sleep(5)
+            StockMgr.download_history(safe_pool, start_time=start_date, period='1d', showprogress=True)
+            StockMgr.download_history(safe_pool, start_time=today_str_dl, period='1m', showprogress=True)
 
             scores = []
 

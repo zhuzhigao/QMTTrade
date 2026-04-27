@@ -50,9 +50,8 @@ df = df.ffill().dropna()
 
 # 1b. 获取成分股池
 print(">> 获取成分股池...")
-stockmgr = StockMgr()
-pool_300 = stockmgr.query_stocks_in_sector('000300.SH')
-pool_852 = stockmgr.query_stocks_in_sector('000852.SH')
+pool_300 = StockMgr.query_stocks_in_sector('000300.SH')
+pool_852 = StockMgr.query_stocks_in_sector('000852.SH')
 all_stocks = list(set(pool_300 + pool_852))
 # print(f">> 股票池共 {len(all_stocks)} 只，开始下载历史日线...")
 

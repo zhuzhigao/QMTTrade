@@ -11,6 +11,12 @@ import matplotlib.pyplot as plt
 from xtquant import xtdata
 from tqdm import tqdm # 进度条库，需 pip install tqdm
 import sys
+import os
+
+parent_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+if parent_dir not in sys.path:
+    sys.path.append(parent_dir)
+from utils.stockmgr import StockMgr
 
 # ================= 1. 回测参数配置 =================
 START_DATE = '20230101'
@@ -62,9 +68,7 @@ print(">>> 正在从 QMT 下载和读取本地历史数据...")
 # 确保包含前置数据用于计算长周期指标
 fetch_start = '20181201' 
 
-xtdata.download_history_data(INDEX_CODE, period='1d', start_time=fetch_start, end_time=END_DATE)
-for sym in ALL_SYMBOLS:
-    xtdata.download_history_data(sym, period='1d', start_time=fetch_start, end_time=END_DATE)
+StockMgr.download_history([INDEX_CODE] + list(ALL_SYMBOLS), start_time=fetch_start, end_time=END_DATE, period='1d')
 
 # 获取基准数据
 idx_data = xtdata.get_market_data_ex(['high', 'low', 'close'], [INDEX_CODE], period='1d', start_time=fetch_start, end_time=END_DATE, dividend_type='front')[INDEX_CODE]

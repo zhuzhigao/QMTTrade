@@ -21,6 +21,7 @@ if parent_dir not in sys.path:
     sys.path.append(parent_dir)
 
 from utils.utilities import StrategyLedger, BlacklistManager
+from utils.stockmgr import StockMgr
 from utils.trademgr import TradeMgr
 # ================= 1. 全局配置与参数 =================
 BEIJING_TZ = timezone(timedelta(hours=8))
@@ -62,12 +63,6 @@ class MyCallback(XtQuantTraderCallback):
         print(f"成交回报: {trade.stock_code}, 数量: {trade.traded_volume}, 价格: {trade.traded_price}")
 
 
-def on_progress(res):
-    print(f"下载进度: {res}")
-
-def download_data(stock_list, period, start_time, end_time, callback = None):
-     time.sleep(1)
-     xtdata.download_history_data2(stock_list, period=period, start_time=start_time, end_time=end_time, callback=callback)
 
 # ================= 3. 核心选股与信号模块 =================
 def get_market_trend_stock_num():
@@ -75,7 +70,7 @@ def get_market_trend_stock_num():
     # 往前推 40 个自然日，绝对保证覆盖 20 个交易日
     print("动态仓位控制：根据沪深300与10日均线的偏离度(乖离率)决定持仓数量")
     start_date = (datetime.datetime.now(BEIJING_TZ) - datetime.timedelta(days=40)).strftime("%Y%m%d")
-    download_data([Config.index_code], period='1d', start_time=start_date, end_time='', callback=on_progress)
+    StockMgr.download_history([Config.index_code], start_time=start_date, period='1d')
     df = xtdata.get_market_data_ex(['close'], [Config.index_code], period='1d', count=20, dividend_type='front')[Config.index_code]
     
     if df.empty or len(df) < 10:
@@ -150,7 +145,7 @@ def get_fundamental_pool(limit=10):
     
     # 【修正处 1：个股初筛行情下载】往前推10个自然日，确保覆盖5个交易日
     start_date_stock = (datetime.datetime.now(BEIJING_TZ) - datetime.timedelta(days=10)).strftime("%Y%m%d")
-    download_data(candidate_stocks, period='1d', start_time=start_date_stock, end_time='',  callback=on_progress)
+    StockMgr.download_history(candidate_stocks, start_time=start_date_stock, period='1d')
     market_data = xtdata.get_market_data_ex(['close', 'amount'], candidate_stocks, period='1d', count=5)
     
     for _, row in df_pool.iterrows():
@@ -384,7 +379,7 @@ def adjust_positions(trader, account, target_list):
     # 【修正处 3：买入前的新标的行情下载】往前推 5 天，确保覆盖最新 1 天
     start_date_buy = (datetime.datetime.now(BEIJING_TZ) - datetime.timedelta(days=5)).strftime("%Y%m%d")
     for code in buy_list:
-        download_data([code], period='1d', start_time=start_date_buy, end_time='')
+        StockMgr.download_history([code], start_time=start_date_buy, period='1d')
         price_df = xtdata.get_market_data_ex(['close'], [code], period='1d', count=1)
         if code in price_df and not price_df[code].empty:
             price = price_df[code]['close'].iloc[-1]

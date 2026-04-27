@@ -1,11 +1,11 @@
 __all__ = ['MarketMgr']
 
 import datetime
-import time
 import numpy as np
 from scipy import stats
 from datetime import timezone, timedelta
 from xtquant import xtdata
+from utils.stockmgr import StockMgr
 
 BEIJING_TZ = timezone(timedelta(hours=8))
 
@@ -28,8 +28,7 @@ class MarketMgr:
         - bool: True 表示处于猴市，False 表示非猴市（趋势市或极低波动的死市）
         """
         # 1. 补充下载最近的日线数据 (防止本地数据缺失)
-        time.sleep(1)
-        xtdata.download_history_data2([stock_code], '1d', '20260101', '')
+        StockMgr.download_history([stock_code], start_time='20260101', period='1d')
 
         # 2. 从本地缓存获取最近 window + 1 天的收盘价
         data = xtdata.get_market_data(
@@ -75,8 +74,8 @@ class MarketMgr:
         """
         print(f"正在计算 {index_code} 的 RSRS 信号...")
         start_date = (datetime.datetime.now(BEIJING_TZ) - datetime.timedelta(days=rsrs_m + rsrs_n)).strftime("%Y%m%d")
-        xtdata.download_history_data(index_code, period='1d', start_time=start_date, end_time='')
-        xtdata.download_history_data(index_code, period='1m', start_time=datetime.datetime.now(BEIJING_TZ).strftime("%Y%m%d"), end_time='')
+        StockMgr.download_history([index_code], start_time=start_date, period='1d')
+        StockMgr.download_history([index_code], start_time=datetime.datetime.now(BEIJING_TZ).strftime("%Y%m%d"), period='1m')
 
         data = xtdata.get_market_data_ex(['high', 'low'], [index_code], period='1d', count=rsrs_m + rsrs_n, dividend_type='front')[index_code]
         highs = data['high'].values

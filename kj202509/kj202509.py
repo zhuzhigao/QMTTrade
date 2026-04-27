@@ -33,10 +33,6 @@ class MyCallback(XtQuantTraderCallback):
     def on_stock_trade(self, trade):
         print(f">> 成交回报: 代码:{trade.stock_code}, 成交量:{trade.traded_volume}, 成交价:{trade.traded_price}")
 
-def download_data(stock_list, period, start_time, end_time, callback = None):
-     time.sleep(1)
-     xtdata.download_history_data2(stock_list, period=period, start_time=start_time, end_time=end_time, callback=callback)
-     
 # ================= 2. 策略核心逻辑类 =================
 class AllWeatherStrategy:
 
@@ -161,7 +157,7 @@ class AllWeatherStrategy:
     def _check_monkey_market(self, current_date):
         """模块 0：判断市场是否处于猴市，决定是否暂停策略"""
         print(f"执行市场环境 (猴市) 巡检...")
-        if MarketMgr().is_monkey_market():
+        if MarketMgr.is_monkey_market():
             print(">> ⚠️ 猴市警报：当前市场处于宽幅无序震荡，极易双边打脸！")
             self.is_paused = True
             if self.current_style != 'DEFENSE':
@@ -180,8 +176,8 @@ class AllWeatherStrategy:
         try:
             start_date = (datetime.datetime.now(BEIJING_TZ) - datetime.timedelta(days=30)).strftime("%Y%m%d")
             print('start download index data')
-            xtdata.download_history_data2([self.benchmark_big, self.benchmark_small], period='1d', start_time=start_date, end_time='')
-            print('index data downloade')
+            StockMgr.download_history([self.benchmark_big, self.benchmark_small], start_time=start_date, period='1d')
+            print('index data downloaded')
             big_data = xtdata.get_market_data(['close'], [self.benchmark_big], '1d', count=21, dividend_type='front')
             small_data = xtdata.get_market_data(['close'], [self.benchmark_small], '1d', count=21, dividend_type='front')
 
@@ -232,7 +228,7 @@ class AllWeatherStrategy:
         print(f"执行周度熔断审查...")
         benchmark = self.benchmark_big if self.current_style == 'BIG' else self.benchmark_small
         start_date = (datetime.datetime.now(BEIJING_TZ) - datetime.timedelta(days=30)).strftime("%Y%m%d")
-        xtdata.download_history_data2([self.benchmark_big, self.benchmark_small], period='1d', start_time=start_date, end_time='')
+        StockMgr.download_history([self.benchmark_big, self.benchmark_small], start_time=start_date, period='1d')
         b_data = xtdata.get_market_data(['close'], [benchmark], '1d', count=20, dividend_type='front')
 
         if 'close' in b_data and not b_data['close'].empty:
@@ -341,9 +337,8 @@ class AllWeatherStrategy:
         print(f">> 开始执行 {style} 风格建仓逻辑...")
 
         # 1. 获取候选股票池
-        mgr = StockMgr()
         index_code = '000300.SH' if style == 'BIG' else '000852.SH'
-        pool = mgr.query_stocks_in_sector(index_code)
+        pool = StockMgr.query_stocks_in_sector(index_code)
         if not pool:
             print("!! 获取板块成分股失败，请检查QMT终端左下角【数据下载】是否下载了板块数据 !!")
             return
@@ -415,10 +410,9 @@ class AllWeatherStrategy:
     def _filter_fundamentals(self, pool, style):
         """核心防雷区：基本面清洗，解决幸存者偏差，强制校验扣非净利润"""
         try:
-            mgr = StockMgr()
             rows = {}
             for stock in pool:
-                info = mgr.query_stock(stock)
+                info = StockMgr.query_stock(stock)
                 if info is not None and info.is_valid():
                     rows[stock] = {
                         'roe':        info.roe,

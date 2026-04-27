@@ -1,5 +1,6 @@
 __all__ = ['StockInfo', 'StockMgr']
 
+from datetime import time
 from dataclasses import dataclass
 from typing import Optional
 import pandas as pd
@@ -26,7 +27,8 @@ class StockMgr:
     """从 QMT 数据源查询并构造 StockInfo"""
 
 
-    def query_stock(self, stock: str) -> Optional[StockInfo]:
+    @staticmethod
+    def query_stock(stock: str) -> Optional[StockInfo]:
         """查询单只股票的基本面快照，失败返回 None"""
         try:
             fin_data = xtdata.get_financial_data([stock], table_list=['PershareIndex', 'Income', 'Capital'], start_time='20250930', report_type='announce_time')
@@ -70,9 +72,27 @@ class StockMgr:
             print(f"错误: {e}")
             return None
     
-    def query_stocks_in_sector(self, sector) ->list :
+    @staticmethod
+    def download_history(codes: list, start_time: str, end_time: str = '',
+                         period: str = '1d', pause=False, showprogress=False) -> None:
+        """逐只下载指定周期的历史数据"""
+        total = len(codes)
+        for i, code in enumerate(codes, 1):
+            if showprogress:
+                print(f"[{i}/{total}] 下载 {code} {period} {start_time}~{end_time or 'now'} ...", end=' ', flush=True)
+            callback = (lambda res: print(f"进度: {res}")) if showprogress else None
+            xtdata.download_history_data(code, period=period, start_time=start_time, end_time=end_time, callback=callback)
+            if showprogress:
+                print("完成")
+            if pause:
+                time.sleep(1)
+
+    @staticmethod
+    def query_stocks_in_sector(sector) -> list:
         weights = xtdata.get_index_weight(sector)
         if not weights:
             xtdata.download_index_weight()
             weights = xtdata.get_index_weight(sector)
         return list(weights.keys()) if weights else []
+    
+    
