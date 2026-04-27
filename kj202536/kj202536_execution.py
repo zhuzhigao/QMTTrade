@@ -233,13 +233,14 @@ class RobotTrader:
                 print(f"信号: 进攻 | 今日非周一调仓日，动量不变，保持当前持仓装死。")
                 return # 不是周一，直接退出函数，不进行换仓
             
+            
             # 批量预下载所有ETF历史数据，避免在循环内逐只下载
             start_date = (datetime.datetime.now(BEIJING_TZ) - datetime.timedelta(days=Config.rsrs_m + Config.rsrs_n)).strftime("%Y%m%d")
             today_str_dl = datetime.datetime.now(BEIJING_TZ).strftime("%Y%m%d")
             xtdata.download_history_data2(safe_pool, period='1d', start_time=start_date, end_time='')
-            time.sleep(1)
+            time.sleep(5)
             xtdata.download_history_data2(safe_pool, period='1m', start_time=today_str_dl, end_time='')
-            time.sleep(1)
+            time.sleep(5)
 
             scores = []
 
