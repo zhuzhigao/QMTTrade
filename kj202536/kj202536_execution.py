@@ -282,64 +282,73 @@ class RobotTrader:
         self.sync_orders(target_list)
 
     def sync_orders(self, target_list):
-        # 获取当前持仓
         positions = self.trader.query_stock_positions(self.acc)
-        
-        # 👇👇👇 修改：不仅要求 volume > 0，还要求代码必须在白名单里 👇👇👇
-        # 用 volume > 0 识别持仓（含今日买入），用 can_use_volume 作为可卖数量
         current_holdings = {
-            p.stock_code: p.can_use_volume
+            p.stock_code: p
             for p in positions
             if p.volume > 0 and p.stock_code in Config.all_symbols
         }
-        
+
         buy_records = []
         sell_records = []
-
         today_str = datetime.datetime.now(BEIJING_TZ).strftime("%Y%m%d")
-        # ================= A. 卖出不再目标的标的 =================
-        for code in current_holdings.keys():
-            if code not in target_list:
-                # 获取实际可卖数量（T+1限制，当日买入的 can_use_volume 为0）
-                sell_vol = current_holdings[code]
-                if sell_vol <= 0:
-                    print(f"  -> {code} 今日买入，暂不可卖，跳过")
+
+        # 每个仓位的目标金额，驱动全量再平衡
+        target_value_per_slot = Config.policy_asset / len(target_list)
+        rebalance_tolerance = 0.05  # 偏差在 5% 以内不触发微调
+
+        print(f"\n本策略分配额度: {Config.policy_asset:.2f} | 目标持仓数: {len(target_list)} | 每仓目标金额: {target_value_per_slot:.2f}")
+
+        # ===== A. 卖出（调出目标池 + 超配减仓）=====
+        full_sell_codes = set()  # 用于轮询等待全仓清零
+        for code, pos in current_holdings.items():
+            sell_vol = 0
+            reason = ""
+            try:
+                tick = xtdata.get_full_tick([code])
+                if code not in tick or tick[code]['lastPrice'] <= 0:
+                    print(f"  -> 获取 {code} 最新价失败，跳过卖出检查")
                     continue
+                current_price = tick[code]['lastPrice']
+
+                if code not in target_list:
+                    sell_vol = pos.can_use_volume
+                    reason = "调出目标池"
+                else:
+                    current_value = pos.volume * current_price
+                    if current_value > target_value_per_slot * (1 + rebalance_tolerance):
+                        excess_value = current_value - target_value_per_slot
+                        sell_vol = min(
+                            int(excess_value / current_price / 100) * 100,
+                            pos.can_use_volume
+                        )
+                        reason = f"超配减仓(市值:{current_value:.0f} 目标:{target_value_per_slot:.0f})"
+
+                if sell_vol <= 0:
+                    if reason:
+                        print(f"  -> {code} {reason}，但可卖数量为0（今日买入），跳过")
+                    continue
+
                 name = Config.symbol_to_name.get(code, code)
                 remark = f"Sell_{name}_{today_str}"
-                try:
-                    # 瞬间拉取最新盘口价
-                    tick = xtdata.get_full_tick([code])
-                    if code in tick and tick[code]['lastPrice'] > 0:
-                        current_price = tick[code]['lastPrice']
-                        print(f"【准备卖出】{code} | 单价: {current_price} | 数量: {sell_vol}股 | 逻辑: 调出目标池")
+                print(f"【准备卖出】{code} | 单价: {current_price} | 数量: {sell_vol}股 | 逻辑: {reason}")
+                if not DEBUG:
+                    seq = self.trader.order_stock(self.acc, code, xtconstant.STOCK_SELL, sell_vol, xtconstant.FIX_PRICE, current_price, "36_Strategy_Sell", remark)
+                    if seq != -1:
+                        sell_records.append(f"{name}({code}) | 数量: {sell_vol} | {reason}")
+                        if code not in target_list:
+                            full_sell_codes.add(code)
+            except Exception as e:
+                print(f"  -> {code} 卖出处理报错: {e}")
 
-                        # 发送真实的卖出委托
-                        if not DEBUG:
-                            seq = self.trader.order_stock(self.acc, code, xtconstant.STOCK_SELL, sell_vol, xtconstant.FIX_PRICE, current_price, "36_Strategy_Sell", remark)
-                            if (seq != -1):
-                                name = Config.symbol_to_name.get(code, code)
-                                sell_records.append(f"{name}({code}) | 数量: {sell_vol}")
-                    else:
-                        print(f"  -> 获取 {code} 最新价失败，跳过卖出")
-                except Exception as e:
-                    print(f"  -> {code} 卖出订单报错: {e}")
-
-        # 轮询等待卖出单成交，最多等 120 秒，避免 sleep(20) 的固定盲等
-        if sell_records and not DEBUG:
-            sold_codes = {
-                code for code in current_holdings.keys()
-                if code not in target_list and current_holdings[code] > 0
-            }
+        # 等待全仓卖出成交（最多 120 秒）
+        if full_sell_codes and not DEBUG:
             deadline = datetime.datetime.now(BEIJING_TZ) + datetime.timedelta(seconds=120)
-            print(f"  -> 等待卖出成交: {sold_codes}")
+            print(f"  -> 等待全仓卖出成交: {full_sell_codes}")
             while datetime.datetime.now(BEIJING_TZ) < deadline:
                 time.sleep(3)
                 positions = self.trader.query_stock_positions(self.acc)
-                still_holding = {
-                    p.stock_code for p in positions
-                    if p.stock_code in sold_codes and p.volume > 0
-                }
+                still_holding = {p.stock_code for p in positions if p.stock_code in full_sell_codes and p.volume > 0}
                 if not still_holding:
                     print(f"  -> 卖出已全部成交。")
                     break
@@ -347,47 +356,49 @@ class RobotTrader:
             else:
                 print(f"  !! 超时 120 秒仍有未成交卖单，继续执行买入（可用现金以实际为准）。")
 
-        # 卖出结算后再查资产，确保可用资金已更新
+        # ===== B. 买入（新标的 + 欠配补仓）=====
+        # 重新查询最新持仓，确保拿到卖出后的最新状态
+        positions = self.trader.query_stock_positions(self.acc)
+        current_holdings = {
+            p.stock_code: p
+            for p in positions
+            if p.volume > 0 and p.stock_code in Config.all_symbols
+        }
         asset = self.trader.query_stock_asset(self.acc)
-        available_cash = min(asset.cash, Config.policy_asset)  # 用实际可用现金，而非含持仓市值的总资产
-        print(f"账户总资产: {asset.total_asset:.2f} | 可用现金: {asset.cash:.2f} | 本策略实际分配额度: {available_cash:.2f}")
+        print(f"账户总资产: {asset.total_asset:.2f} | 可用现金: {asset.cash:.2f}")
 
-        # B. 买入目标 (按可用现金等权分配)
-        buy_targets = [code for code in target_list if code not in current_holdings]
-        if not buy_targets:
-            print("所有目标均已持仓，无需买入。")
-            return
-        weight = 1.0 / len(buy_targets)
-        for code in buy_targets:
-            target_value = available_cash * weight
-            print(f"【调整计划】{code} | 目标价值: {target_value:.2f}")
-            
+        for code in target_list:
             try:
-                # 1. 获取最新盘口价格 (为了计算能买多少股)
                 tick = xtdata.get_full_tick([code])
-                if code in tick and tick[code]['lastPrice'] > 0:
-                    current_price = tick[code]['lastPrice']
-                else:
-                    print(f"  -> 获取 {code} 最新价失败，跳过下单")
+                if code not in tick or tick[code]['lastPrice'] <= 0:
+                    print(f"  -> 获取 {code} 最新价失败，跳过买入")
                     continue
-                
-                # 2. 计算需要买入的股数 (金额 / 单价 / 100向下取整 * 100)
-                # A股/ETF 买入必须是 1 手 (100股) 的整数倍
-                target_volume = int(target_value / current_price / 100) * 100
+                current_price = tick[code]['lastPrice']
                 name = Config.symbol_to_name.get(code, code)
-                remark = f"Buy_{name}_{today_str}"
-                # 3. 发送真实的买入委托
-                if target_volume > 0:
-                    print(f"【实际买入】{code} | 单价: {current_price} | 数量: {target_volume}股")
-                    # 参数说明: 23=买入, target_volume=买入股数, 11=本方最优(市价/最新价单)
-                    if not DEBUG:
-                        seq = self.trader.order_stock(self.acc, code, xtconstant.STOCK_BUY, target_volume, xtconstant.FIX_PRICE, current_price, "36_Strategy_Buy", remark)
-                        if (seq != -1):
-                            name = Config.symbol_to_name.get(code, code)
-                            buy_records.append(f"{name}({code}) | 价格: {current_price} | 数量: {target_volume}")
+
+                if code in current_holdings:
+                    pos = current_holdings[code]
+                    current_value = pos.volume * current_price
+                    if current_value < target_value_per_slot * (1 - rebalance_tolerance):
+                        diff_value = target_value_per_slot - current_value
+                        buy_vol = int(diff_value / current_price / 100) * 100
+                        reason = f"欠配补仓(市值:{current_value:.0f} 目标:{target_value_per_slot:.0f})"
+                    else:
+                        print(f"  -> {code} 持仓均衡(市值:{current_value:.0f} ≈ 目标:{target_value_per_slot:.0f})，无需调整")
+                        continue
                 else:
-                    print(f"  -> {code} 计算出的买入股数不足 1 手，无法下单")
-                    
+                    buy_vol = int(target_value_per_slot / current_price / 100) * 100
+                    reason = "新标的"
+
+                remark = f"Buy_{name}_{today_str}"
+                if buy_vol > 0:
+                    print(f"【实际买入】{code} | 单价: {current_price} | 数量: {buy_vol}股 | 逻辑: {reason}")
+                    if not DEBUG:
+                        seq = self.trader.order_stock(self.acc, code, xtconstant.STOCK_BUY, buy_vol, xtconstant.FIX_PRICE, current_price, "36_Strategy_Buy", remark)
+                        if seq != -1:
+                            buy_records.append(f"{name}({code}) | 价格: {current_price} | 数量: {buy_vol} | {reason}")
+                else:
+                    print(f"  -> {code} 计算出的买入股数不足1手，无法下单")
             except Exception as e:
                 print(f"  -> {code} 订单生成时报错: {e}")
 
