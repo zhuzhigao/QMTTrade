@@ -287,8 +287,11 @@ def download_xtquant_data():
     pool2 = StockMgr.query_stocks_in_sector('000852.SH')
     pool = list(pool1) + list(pool2) + ['000300.SH', '000852.SH']
     StockMgr.download_history(pool, start_time='20260101', period='1d', showprogress=True)
+    print(f"✅ 股票历史数据下载完毕。")
+    time.sleep(5)
     xtdata.download_financial_data2(pool, table_list=['PershareIndex','Income', 'Capital'], start_time='20250930',
                                      callback=lambda res: print(f">> 财务数据下载进度: {res}"))
+    print(f"✅ 股票财务数据下载完毕。")
 
 
 # ================= 3. 执行主入口 =================
@@ -304,9 +307,11 @@ if __name__ == '__main__':
     # time.sleep(3) # 模块间休眠
 
     # update_industry_data_to_db()
-    
+    # time.sleep(3) # 模块间休眠
+
     # update_audit_report_to_db()
     
     # print("\n🎉 所有数据更新程序执行完毕！")
-
-    download_xtquant_data()
+   
+    #time.sleep(3) # 模块间休眠
+    download_xtquant_data() 
