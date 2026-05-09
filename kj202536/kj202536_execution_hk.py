@@ -263,7 +263,9 @@ def run(policy_asset: float):
         try:
             # 复用动量扫描缓存；防御模式下 target 不在缓存里，重新拉取
             # count=15 反推 30 个日历天，应对港股长假（圣诞+元旦、清明+劳动节等）
-            df = ohlc_cache.get(code) or _fetch_ohlc(code, count=15)
+            df = ohlc_cache.get(code)
+            if df is None:
+                df = _fetch_ohlc(code, count=15)
             price = float(df['close'].iloc[-1])
             lot = Config.lot_sizes.get(code, 100)
             lot_count     = int(target_value / price / lot)

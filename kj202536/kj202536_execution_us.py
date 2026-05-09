@@ -22,40 +22,46 @@ except ImportError:
 
 # ======================== 1. 策略配置 ========================
 class Config:
-    # ── 全天候美国本土化轮动资产池（带详细描述） ────
     etf_groups = {
 
-        # ── 防守层：流动性保障 + 宏观危机对冲 ─────────────────────
+        # ── 防守 (Defensive)：构建全久期债权护城河 + 硬通货对冲 ──
         'Defensive': {
-            'SGOV': 'iShares 0-3 Month Treasury Bond ETF | [角色: 现金替代] 超短期美债，年化~5%无风险收益，大盘暴跌时的终极避风港。',
-            'GLD':  'SPDR Gold Trust                | [角色: 危机对冲] 全球最大实物黄金ETF，对冲地缘政治、美元贬值与信用风险。',
-            'SHY':  'iShares 1-3 Year Treasury ETF  | [角色: 债权防守] 短期美债ETF，底层安全，熊市中提供稳定的利息缓冲。',
+            'SGOV': 'iShares 0-3月美债 ETF | [角色: 现金替代] 几乎无价格波动的无风险收益标的。在加息周期或全场暴跌、RSRS转空时，作为最终的避风港，赚取无风险利息。',
+            'IEF':  'iShares 7-10年美债 ETF | [角色: 配置中轴] 中久期国债，对利率变动中度敏感。用于平滑由于长债波动过大带来的回撤，是经典的股债平衡核心。',
+            'TLT':  'iShares 20年+美债 ETF  | [角色: 衰退利器] 高久期债权，与股市具有极强的负相关性。在经济衰退预期升温或股市急剧崩盘时，通过久期杠杆实现逆势上涨。',
+            'GLD':  'SPDR 黄金 ETF          | [角色: 硬资产避险] 针对地缘政治冲突、信用风险及恶性通胀的终极对冲工具。当信用货币受压时，它能提供非线性的防御收益。',
         },
 
-        # ── 核心Beta：美国两大权益基准 ───────────────────────────
-        'Core_Beta': {
-            'SPY': 'SPDR S&P 500 ETF     | [角色: 美股风向标] 标普500指数，全美大盘蓝筹基准，流动性断层第一，复苏先锋。',
-            'QQQ': 'Invesco QQQ Trust     | [角色: 科技核心] 纳斯达克100指数，科技与成长龙头集中营，牛市弹性极强。',
+        # ── 核心 (Core)：获取美国市场最纯粹的 Beta 收益 ──
+        'Core': {
+            'QQQ': '纳指100 ETF (Invesco)  | [角色: 成长先锋] 集中于科技、生物医药及互联网巨头。在降息预期或技术创新驱动的牛市中，作为动量评分最高的“进攻矛”。',
+            'SPY': '标普500 ETF (SPDR)     | [角色: 市场基准] 覆盖美国500家蓝筹企业，行业分布均衡。作为策略的底仓逻辑，代表美国整体经济的平均增长溢价。',
         },
 
-        # ── 风格层：价值、红利与成长因子的交替切换 ─────────────────
-        'Style_Factors': {
-            'VTV':  'Vanguard Value ETF        | [角色: 深度价值] 美国大中盘价值因子，金融/工业/能源低位蓝筹，估值修复利器。',
-            'SCHD': 'Schwab US Dividend ETF    | [角色: 红利护盾] 优质高分红公司，震荡市中抗跌与收息兼备，防御属性强。',
-            'VUG':  'Vanguard Growth ETF       | [角色: 成长进攻] 美国大中盘成长因子，科技/消费龙头，牛市动量引擎。',
-            'IWM':  'iShares Russell 2000 ETF  | [角色: 小盘高Beta] 罗素2000小盘股指数，美国本土经济敏感，复苏期弹性最大。',
+        # ── 因子 (Factors)：利用二级市场风格漂移获取 Alpha ──
+        'Factors': {
+            'SCHD': '嘉信理财美国红利 ETF   | [角色: 红利护盾] 筛选现金流稳健、持续派息的优质企业。在震荡市或价值风格占优时，提供极强的抗跌性和确定性现金流。',
+            'MTUM': 'iShares 动量因子 ETF   | [角色: 趋势加速] 专门追逐过去一段时间涨幅最猛的股票。在单边牛市中能显著增强收益，但在风格切换期需警惕“动量崩塌”。',
+            'USMV': 'iShares 低波动因子 ETF | [角色: 避震器] 选取波动率最低的股票组合。在市场方向不明、多空博弈激烈的“磨底期”，通过极低回撤实现净值的稳定攀升。',
+            'QUAL': 'iShares 质量因子 ETF   | [角色: 穿越周期] 侧重于高净资产收益率、低负债的公司。在经济放缓阶段，这类具备“护城河”的企业是机构资金的抱团首选。',
         },
 
-        # ── 行业主题：高弹性单边方向 ─────────────────────────────
-        'Themes': {
-            'XLK': 'Technology Select Sector SPDR | [角色: 科技趋势] 纯美国科技板块，覆盖AAPL/MSFT/NVDA等巨头，强单边趋势矛。',
-            'XBI': 'SPDR S&P Biotech ETF          | [角色: 生物科技] 高Beta生物技术，创新药催化剂驱动，波动大弹性强。',
-            'TAN': 'Invesco Solar ETF             | [角色: 清洁能源] 全球太阳能产业链，政策驱动型强趋势主题。',
+        # ── 宏观/抗通胀 (Macro)：针对滞胀与供应端的针对性布局 ──
+        'Macro': {
+            'XLE': '能源行业 ETF (SPDR)    | [角色: 通胀对冲] 挂钩原油及天然气价格。在能源通胀期或地缘政治影响供给时，往往与科技股形成完美的翘翘板效应。',
+            'DBA': '农业基金 ETF (Invesco)  | [角色: 粮食安全] 涵盖玉米、大豆、糖等主要农产品期货。作为与股市相关性极低的资产，在气候异常或滞胀环境下提供独立的动量来源。',
         },
+
+        # ── 国际 (International)：地理溢价与汇率套利 ──
+        'International': {
+            'VEA': 'Vanguard 发达市场 ETF  | [角色: 非美补位] 覆盖欧洲、日本等发达经济体。在美元指数走弱或非美资产估值极度低廉时，作为逃离美股高估值的轮动选择。',
+            'EEM': 'iShares 新兴市场 ETF   | [角色: 高弹性Beta] 侧重于中国、印度、巴西等高增长地区。在全市场风险偏好提升时，能捕捉到比美股更大的波动溢价。',
+        }
     }
 
-    bond_etf   = 'SGOV'
-    rsrs_index = 'SPY'
+    # 策略运行关键参数
+    target_num = 3           # 每一轮调仓最终选出的精英标的数量
+    rsrs_index = 'SPY'       # 择时基准，锚定全球流动性风向标标普500
 
     all_symbols    = [c for g in etf_groups.values() for c in g]
     symbol_to_name = {
@@ -76,34 +82,40 @@ class Config:
 
 
 # ======================== 2. 数据获取 ========================
-def _fetch_ohlc(symbol: str, count: int) -> pd.DataFrame:
-    """通过 yfinance 获取美股 ETF 日线数据（前复权）。"""
-    end   = datetime.datetime.today()
+def _fetch_ohlc(symbol: str, count: int, max_retries: int = 3) -> pd.DataFrame:
+    """
+    通过 yfinance (Yahoo Finance) 获取美股 ETF 日线数据（复权）。
+    使用 Ticker.history() 避免 yf.download() 的 MultiIndex 列名问题。
+    count: 所需交易日条数（反推 count*3 个日历天以覆盖节假日）。
+    max_retries: 遇到网络瞬时抖动时的重试次数，每次间隔指数增长。
+    """
+    import time
+    end   = datetime.datetime.today() + datetime.timedelta(days=1)
     start = end - datetime.timedelta(days=count * 3)
 
-    try:
-        df = yf.download(
-            symbol,
-            start=start.strftime('%Y-%m-%d'),
-            end=end.strftime('%Y-%m-%d'),
-            auto_adjust=True,
-            progress=False,
-        )
-        if df.empty:
-            raise ValueError(f"No data returned for {symbol}")
+    last_err = None
+    for attempt in range(max_retries):
+        try:
+            raw = yf.Ticker(symbol).history(
+                start=start.strftime('%Y-%m-%d'),
+                end=end.strftime('%Y-%m-%d'),
+                auto_adjust=True,
+            )
+            if raw.empty:
+                raise ValueError(f"No data returned for {symbol}")
+            df = raw.reset_index()
+            df = df.rename(columns={'Date': 'date', 'High': 'high', 'Low': 'low', 'Close': 'close'})
+            df['date'] = pd.to_datetime(df['date']).dt.tz_localize(None)
+            df = df.dropna(subset=['high', 'low', 'close'])
+            df = df.sort_values('date').tail(count).reset_index(drop=True)
+            return df[['date', 'high', 'low', 'close']]
+        except Exception as e:
+            last_err = e
+            wait = 2 ** attempt          # 1s → 2s → 4s
+            print(f"  [重试 {attempt + 1}/{max_retries}] {symbol} 请求失败，{wait}s 后重试... ({e})")
+            time.sleep(wait)
 
-        df = df.reset_index()
-        df.columns = [str(c).lower() for c in df.columns]
-        date_col = next((c for c in df.columns if c in ('date', 'datetime', 'time')), 'date')
-        result = pd.DataFrame()
-        result['date'] = pd.to_datetime(df[date_col])
-        result['high'] = pd.to_numeric(df['high'], errors='coerce')
-        result['low']  = pd.to_numeric(df['low'], errors='coerce')
-        result['close'] = pd.to_numeric(df['close'], errors='coerce')
-        result = result.dropna().sort_values('date').tail(count).reset_index(drop=True)
-        return result[['date', 'high', 'low', 'close']]
-    except Exception as e:
-        raise RuntimeError(f"yfinance download failed for {symbol}: {e}")
+    raise RuntimeError(f"{symbol} 连续 {max_retries} 次请求失败: {last_err}")
 
 
 # ======================== 3. 核心算法 ========================
@@ -188,7 +200,7 @@ def run(policy_asset: float):
         scores: list[dict] = []
         print(f"  {'代码':<8}  {'名称':<38}  {'动量得分':>10}")
         print(f"  {'-' * 60}")
-        for code in Config.all_symbols:
+        for code in Config.all_symbols[:]:
             name = Config.symbol_to_name.get(code, code)
             try:
                 df = _fetch_ohlc(code, count=max(Config.rank_days + 10, 30))
@@ -235,12 +247,18 @@ def run(policy_asset: float):
     for code in target_list:
         name = Config.symbol_to_name.get(code, code)
         try:
-            df = ohlc_cache.get(code) or _fetch_ohlc(code, count=15)
+            df = ohlc_cache.get(code)
+            if df is None:
+                df = _fetch_ohlc(code, count=15)
             price = float(df['close'].iloc[-1])
-            shares = max(1, int(target_value / price))
-            est_value = shares * price
-            print(f"  {code:<8}  {name:<38}  {price:>8.2f} USD  "
-                  f"{shares:>10,} 股  ≈{est_value:>10,.0f} USD")
+            shares = int(target_value / price)
+            if shares == 0:
+                print(f"  {code:<8}  {name:<38}  {price:>8.2f} USD  "
+                      f"  ⚠ 仓位不足以买入1股（最低需 USD {price:,.2f}，当前每仓 USD {target_value:,.0f}）")
+            else:
+                est_value = shares * price
+                print(f"  {code:<8}  {name:<38}  {price:>8.2f} USD  "
+                      f"{shares:>10,} 股  ≈{est_value:>10,.0f} USD")
         except Exception as e:
             print(f"  {code:<8}  {name:<38}  价格获取失败: {e}")
 
