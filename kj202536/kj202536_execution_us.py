@@ -77,6 +77,7 @@ class Config:
     sell_threshold = -0.5
     rank_days      = 20
     target_num     = 3
+    safe_havens    = ['SGOV']  # 防御模式避险标的：0-3月美债，现金替代
 
     policy_asset   = 10000   # USD
 
@@ -146,14 +147,16 @@ def calc_rsrs(df: pd.DataFrame, n: int, m: int) -> float:
 
 
 def calc_momentum(df: pd.DataFrame, rank_days: int) -> float:
-    """动量平稳度评分 = 年化收益率 × R²"""
+    """动量质量评分 = (年化收益率 / 年化波动率) × R²（平滑夏普比率）"""
     prices = df['close'].values[-rank_days:]
     if len(prices) < rank_days:
         return -999.0
     y = np.log(prices)
     x = np.arange(len(y))
     slope, _, r_val, *_ = stats.linregress(x, y)
-    return float((np.exp(slope * 250) - 1) * (r_val ** 2))
+    annualized_return = np.exp(slope * 250) - 1
+    annualized_vol = np.diff(y).std() * np.sqrt(250) + 1e-9
+    return float((annualized_return / annualized_vol) * (r_val ** 2))
 
 
 # ======================== 4. 主逻辑 ========================
@@ -187,7 +190,7 @@ def run(policy_asset: float):
     target_list: list[str] = []
 
     if z < Config.sell_threshold:
-        target_list = [Config.bond_etf]
+        target_list = list(Config.safe_havens)
         print(">>> [信号] 防御模式 — 撤离至避险资产\n")
     else:
         if z > Config.buy_threshold:
@@ -227,7 +230,7 @@ def run(policy_asset: float):
                     break
 
         if not target_list:
-            target_list = [Config.bond_etf]
+            target_list = list(Config.safe_havens)
             print("  所有标的动量为负，切换至避险资产\n")
 
     # ── 3. 输出调仓方案 ─────────────────────────────────────────

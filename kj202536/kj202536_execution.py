@@ -182,16 +182,17 @@ def filter_audit_opinion(pool):
         return etfs
 
 def get_momentum_score(code):
-    """计算动量平稳度评分: Return * R2（历史数据由调用方批量预下载）"""
+    """动量质量评分 = (年化收益率 / 年化波动率) × R²（平滑夏普比率）"""
     data = xtdata.get_market_data_ex(['close'], [code], period='1d', count=Config.rank_days)[code]
     prices = data['close'].values
     if len(prices) < Config.rank_days: return -999
-    
+
     y = np.log(prices)
     x = np.arange(len(y))
     slope, _, r_val, _, _ = stats.linregress(x, y)
-    score =  (np.exp(slope * 250) - 1) * (r_val ** 2)
-    return score
+    annualized_return = np.exp(slope * 250) - 1
+    annualized_vol = np.diff(y).std() * np.sqrt(250) + 1e-9
+    return float((annualized_return / annualized_vol) * (r_val ** 2))
 
 # ======================== 3. 交易执行引擎 ========================
 
