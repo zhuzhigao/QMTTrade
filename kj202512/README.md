@@ -160,23 +160,30 @@
 
 ## 运行方式
 
-四个子策略**各自作为独立进程运行**，互不依赖：
+### 推荐方式：主入口统一运行（对应原聚宽架构）
 
 ```bash
-# 调试模式（完整跑逻辑，不发真实报单）
-python kj202512_etf.py
-python kj202512_pb.py
-python kj202512_xsz.py
-python kj202512_dama.py
+# 调试模式（完整跑逻辑，不发真实报单）—— 日常验证
+python kj202512.py
 
-# 实盘模式（谨慎！确认逻辑正确后分别启动）
-python kj202512_etf.py   -m REAL
-python kj202512_pb.py    -m REAL
-python kj202512_xsz.py   -m REAL
-python kj202512_dama.py  -m REAL
+# 实盘模式（谨慎！确认逻辑正确后再启动）
+python kj202512.py -m REAL
 ```
 
-**注意**：运行前需确认每个文件中的 `qmt_path` 和 `account_id` 与实际环境一致。
+一个进程、一个 QMT 连接，同时驱动全部 4 个子策略，与聚宽原版 `initialize()` + `set_subportfolios()` 的架构等价。
+
+### 单子策略独立调试
+
+每个子策略文件保留了自己的 `__main__` 块，可单独运行，方便隔离调试某一子策略：
+
+```bash
+python kj202512_etf.py      # 只跑 ETF 轮动
+python kj202512_pb.py       # 只跑 PB 策略
+python kj202512_xsz.py      # 只跑 小市值
+python kj202512_dama.py     # 只跑 菜场大妈
+```
+
+**注意**：运行前需确认 `kj202512.py`（或各子文件）中的 `qmt_path` 和 `account_id` 与实际环境一致。
 
 ---
 
@@ -184,11 +191,12 @@ python kj202512_dama.py  -m REAL
 
 | 文件 | 说明 |
 |------|------|
+| `kj202512.py` | **主入口**：ONE QMT 连接，同时驱动 4 个子策略（推荐运行入口） |
 | `kj202512_base.py` | 公共基类（Strategy）和过滤工具函数，不可独立运行 |
-| `kj202512_etf.py` | ETF 轮动子策略，可独立运行 |
-| `kj202512_pb.py` | PB 低估值子策略，可独立运行 |
-| `kj202512_xsz.py` | 小市值多因子子策略，可独立运行 |
-| `kj202512_dama.py` | 菜场大妈高股息子策略，可独立运行 |
+| `kj202512_etf.py` | ETF 轮动子策略类定义，含独立 `__main__` 供单独调试 |
+| `kj202512_pb.py` | PB 低估值子策略类定义，含独立 `__main__` 供单独调试 |
+| `kj202512_xsz.py` | 小市值多因子子策略类定义，含独立 `__main__` 供单独调试 |
+| `kj202512_dama.py` | 菜场大妈高股息子策略类定义，含独立 `__main__` 供单独调试 |
 | `etf_holdings.json` | ETF轮动策略持仓账本（运行时自动生成） |
 | `pb_holdings.json` | PB策略持仓账本（运行时自动生成） |
 | `xsz_holdings.json` | 小市值策略持仓账本（运行时自动生成） |
@@ -205,3 +213,4 @@ python kj202512_dama.py  -m REAL
 | 日期 | 变更内容 |
 |------|----------|
 | 2026-05-11 | 初始版本：从聚宽 kj201512 移植至 xtquant，四子策略独立文件，公共基类 kj202512_base.py |
+| 2026-05-11 | 新增 kj202512.py 主入口，还原原版单进程单连接架构，子文件保留 __main__ 供独立调试 |
