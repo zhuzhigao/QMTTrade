@@ -20,7 +20,7 @@ parent_dir = os.path.dirname(current_dir)
 if parent_dir not in sys.path:
     sys.path.append(parent_dir)
 
-from utils.utilities import StrategyLedger, BlacklistManager
+from utils.utilities import StrategyLedger, BlacklistManager, StateManager
 from utils.stockmgr import StockMgr
 from utils.trademgr import TradeMgr
 # ================= 1. 全局配置与参数 =================
@@ -36,7 +36,8 @@ class Config:
     base_stock_num = 4               # 基础持仓股票数量
     stoploss_limit = 0.09            # 个股止损线 9%
     stoploss_market = 0.05           # 市场大跌止损线 5%
-    stopearning_limit = 0.3           # 个股止盈线 30%
+    stopearning_limit = 0.15          # 盈利保护阈值：盈利超过此比例后追踪止损从9%收窄至5%
+    stopearning_trail = 0.05          # 盈利保护模式下的收窄追踪止损比例
     index_code = '000300.SH'         # 参考大盘指数改为沪深300
     
     # 选股过滤参数
@@ -48,8 +49,8 @@ class GlobalVar:
     stock_num = Config.base_stock_num
     market_crash = False             # 大盘是否暴跌
     # 【新增：止损冷却小黑屋】记录止损股票和日期，格式: {'600000.SH': datetime.date(2026, 3, 7)}   
-    strategy_ledger = StrategyLedger('kj202579_holdings.json') 
-    blacklist_mgr = BlacklistManager('kj202579_blacklist.json')             
+    strategy_ledger = StrategyLedger(os.path.join(current_dir, 'kj202579_holdings.json'))
+    blacklist_mgr = BlacklistManager(os.path.join(current_dir, 'kj202579_blacklist.json'))
 
 # ================= 2. 交易回调与状态管理 =================
 class MyCallback(XtQuantTraderCallback):
@@ -266,53 +267,71 @@ def get_tolerant_target_list(trader, account, target_num, tolerance_pool_size=10
     return target_list
 # ================= 4. 交易与风控模块 =================
 
-def check_stop_loss(trader, account):
-    """【风控】个股止盈止损与大盘趋势止损"""
+def check_stop_loss(trader, account, state):
+    """【风控】个股追踪止盈止损与大盘趋势止损"""
 
-    print("开始【风控】个股止盈止损与大盘趋势止损...")
+    print("开始【风控】个股追踪止盈止损与大盘趋势止损...")
     positions = trader.query_stock_positions(account)
     if not positions:
         return
 
-    # 1. 检查大盘暴跌系统性风险（使用 get_full_tick 获取今日实时盘中涨跌，避免读到昨日已收盘的日线数据）
-    tick_data = xtdata.get_full_tick([Config.index_code])
-    if Config.index_code in tick_data:
-        tick = tick_data[Config.index_code]
-        day_open = tick['open']
-        if day_open <= 0:
-            day_open = tick['lastPrice']
-        current_price = tick['lastPrice']
-        if day_open and day_open > 0:
-            down_ratio = (current_price / day_open) - 1
-            print(f"大盘今日盘中涨跌幅: {down_ratio:.2%} (开盘价: {day_open}, 当前价: {current_price})")
+    # 1. 大盘止损：用昨日收盘价作基准，避免低开高走误触发
+    start_date = (datetime.datetime.now(BEIJING_TZ) - datetime.timedelta(days=5)).strftime("%Y%m%d")
+    StockMgr.download_history([Config.index_code], start_time=start_date, period='1d')
+    df_idx = xtdata.get_market_data_ex(['close'], [Config.index_code], period='1d', count=2).get(Config.index_code)
+    if df_idx is not None and len(df_idx) >= 2:
+        prev_close = df_idx['close'].iloc[-2]
+        tick_data = xtdata.get_full_tick([Config.index_code])
+        if Config.index_code in tick_data and prev_close > 0:
+            current_idx_price = tick_data[Config.index_code]['lastPrice']
+            down_ratio = (current_idx_price / prev_close) - 1
+            print(f"大盘相对昨收涨跌幅: {down_ratio:.2%} (昨收: {prev_close:.2f}, 当前: {current_idx_price:.2f})")
             if down_ratio <= -Config.stoploss_market:
                 print(f"大盘跌幅 {down_ratio:.2%} 触发止损!")
                 GlobalVar.market_crash = True
 
     strategy_stocks = GlobalVar.strategy_ledger.get_all()
-    
-    # 2. 检查个股
+
+    # 2. 追踪止损：持续更新历史最高价，以最高价×(1-止损比例)作为止损线
+    high_prices = state.get('stock_high_prices') or {}
+
     for pos in positions:
-        if pos.stock_code not in strategy_stocks:
+        code = pos.stock_code
+        if code not in strategy_stocks:
             continue
-        if pos.can_use_volume == 0 or pos.stock_code == Config.etf:
+        if pos.can_use_volume == 0 or code == Config.etf:
             continue
+
         cost = pos.open_price
         current_price = pos.market_value / pos.volume if pos.volume > 0 else 0
-        
+
+        # 更新追踪高点
+        if current_price > high_prices.get(code, 0):
+            high_prices[code] = current_price
+            state.set('stock_high_prices', high_prices)
+
+        trail_high = high_prices.get(code, cost)
+
         if GlobalVar.market_crash:
-            if order_target_volume(trader, account, pos.stock_code, 0, current_price, 'market_crash_sell'):
-                GlobalVar.blacklist_mgr.add(pos.stock_code)
+            if order_target_volume(trader, account, code, 0, current_price, 'market_crash_sell'):
+                GlobalVar.blacklist_mgr.add(code)
+                high_prices.pop(code, None)
+                state.set('stock_high_prices', high_prices)
             continue
-            
-        if current_price >= cost * (1+Config.stopearning_limit):
-            print(f"[{pos.stock_code}] 触发止盈")
-            order_target_volume(trader, account, pos.stock_code, 0, current_price, 'take_profit')
-            
-        elif current_price < cost * (1 - Config.stoploss_limit):
-            print(f"[{pos.stock_code}] 跌幅超9%触发止损，关进 30 天小黑屋！")
-            if order_target_volume(trader, account, pos.stock_code, 0, current_price, 'stop_loss'):
-                GlobalVar.blacklist_mgr.add(pos.stock_code)
+
+        # 盈利保护：盈利超过阈值时收窄追踪止损，让利润继续跑但保护更严
+        gain_from_cost = (current_price / cost - 1) if cost > 0 else 0
+        trail_pct = Config.stopearning_trail if gain_from_cost >= Config.stopearning_limit else Config.stoploss_limit
+
+        if current_price < trail_high * (1 - trail_pct):
+            if gain_from_cost >= Config.stopearning_limit:
+                print(f"[{code}] 盈利保护触发（已盈 {gain_from_cost:.1%}，高点回撤超 {trail_pct:.0%}），关进 30 天小黑屋！")
+            else:
+                print(f"[{code}] 追踪止损触发（当前 {current_price:.2f} < 历史高点 {trail_high:.2f} × {1-trail_pct:.0%}），关进 30 天小黑屋！")
+            if order_target_volume(trader, account, code, 0, current_price, 'stop_loss'):
+                GlobalVar.blacklist_mgr.add(code)
+                high_prices.pop(code, None)
+                state.set('stock_high_prices', high_prices)
 
 def adjust_positions(trader, account, target_list):
     """【目标调仓】对比当前持仓，执行卖出和买入，实现等权重调仓"""
@@ -435,6 +454,14 @@ def order_target_volume(trader, account, stock_code, target_vol, price, remark='
 # ================= 5. 定时任务主循环 =================
 
 def run_strategy():
+    # 初始化状态管理器（跨重启持久化任务执行记录与追踪止损高点）
+    state = StateManager(os.path.join(current_dir, 'kj202579_state.json'), defaults={
+        'task_09_05_date': '',
+        'task_10_00_date': '',
+        'task_14_00_date': '',
+        'stock_high_prices': {},
+    })
+
     # 初始化交易接口
     session_id = int(time.time())
     trader = XtQuantTrader(Config.mini_qmt_path, session_id)
@@ -442,67 +469,57 @@ def run_strategy():
 
     trader.register_callback(MyCallback())
     trader.start()
-    trader.connect()
+    if trader.connect() != 0:
+        print('连接失败，退出')
+        sys.exit(1)
     trader.subscribe(account)
     print("====== QMT 交易接口连接成功，策略启动 ======")
 
-    # 每日任务执行标记
-    task_done = {'09:05': False, '10:00': False, '14:00': False}
-    
     while True:
         now = datetime.datetime.now(BEIJING_TZ)
         time_str = now.strftime("%H:%M")
-        
-        # 午夜重置任务标记
-        if time_str == "00:00":
-            for k in task_done.keys(): task_done[k] = False
-            GlobalVar.market_crash = False
-            time.sleep(1)
+        today_str = now.strftime("%Y%m%d")
 
-        # 09:05 盘前准备：测算大盘趋势并更新仓位数量
-        if DEBUG or (time_str == "09:05" and not task_done['09:05']):
+        # 09:05 盘前准备：重置大盘止损标志 + 测算大盘趋势并更新仓位数量
+        if DEBUG or (time_str == "09:05" and state.get('task_09_05_date') != today_str):
+            GlobalVar.market_crash = False  # 每天盘前重置，防止昨日触发的标志影响今天
             GlobalVar.stock_num = get_market_trend_stock_num()
             print(f"[{time_str}] 今日大盘趋势运算完成，计划持仓股数: {GlobalVar.stock_num}")
-            task_done['09:05'] = True
+            state.set('task_09_05_date', today_str)
 
         # 10:00 调仓时刻：风控检查 + 根据月份与基本面选股池调仓
-        if DEBUG or (time_str == "10:00" and not task_done['10:00']):
-            # 每天 10:00 都检查止损
-            check_stop_loss(trader, account)
-            
-            # 判断今天是不是周一 (weekday() == 0 代表周一)
+        if DEBUG or (time_str == "10:00" and state.get('task_10_00_date') != today_str):
+            check_stop_loss(trader, account, state)
+
             is_rebalance_day = (now.weekday() == 0) or DEBUG
-            
+
             if now.month in Config.pass_months:
                 print(f"[{time_str}] 当前为规避月份({now.month}月)，空仓防雷，买入 ETF。")
                 adjust_positions(trader, account, [Config.etf])
             elif is_rebalance_day and not GlobalVar.market_crash:
-                # 只有周一且大盘未暴跌时，才进行基本面选股和调仓
                 print(f"[{time_str}] 今日是调仓日, 开始评估持仓排名与宽容度...")
-                # 调用带有宽容度的选股逻辑
-                # GlobalVar.stock_num 是通过大盘均线计算出的动态目标仓位数
                 GlobalVar.target_list = get_tolerant_target_list(
-                    trader, 
-                    account, 
-                    target_num=GlobalVar.stock_num, 
+                    trader,
+                    account,
+                    target_num=GlobalVar.stock_num,
                     tolerance_pool_size=10
                 )
                 adjust_positions(trader, account, GlobalVar.target_list)
             else:
                 print(f"[{time_str}] 今日非调仓日，仅执行风控监控。")
-                
-            task_done['10:00'] = True
+
+            state.set('task_10_00_date', today_str)
 
         # 14:00 下午风控：再次检查系统暴跌或个股止损
-        if DEBUG or (time_str == "14:00" and not task_done['14:00']):
-            check_stop_loss(trader, account)
-            task_done['14:00'] = True
+        if DEBUG or (time_str == "14:00" and state.get('task_14_00_date') != today_str):
+            check_stop_loss(trader, account, state)
+            state.set('task_14_00_date', today_str)
 
         # 防止高频死循环占用CPU
         if DEBUG:
             break
-        else: 
-            time.sleep(1) 
+        else:
+            time.sleep(1)
 
 
 DEBUG = True
@@ -524,4 +541,4 @@ if __name__ == '__main__':
         DEBUG = True
     run_strategy()
 
-#Todo: 自己买入的股票的黑名单，以及T+1限制导致可用资金计算错误的bug
+#Todo: Debug the policy after the change.
