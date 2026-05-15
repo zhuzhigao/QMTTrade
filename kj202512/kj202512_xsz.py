@@ -52,10 +52,11 @@ from xtquant.xttype import StockAccount
 
 current_dir = os.path.dirname(os.path.abspath(__file__))
 parent_dir = os.path.dirname(current_dir)
-if parent_dir not in sys.path:
-    sys.path.append(parent_dir)
+for _p in (current_dir, parent_dir):
+    if _p not in sys.path:
+        sys.path.insert(0, _p)
 
-from kj202512.kj202512_base import (
+from kj202512_base import (
     Strategy, make_logger, get_universe, filter_st, filter_new_stock,
     filter_suspended, filter_limit_up, filter_limit_down,
     get_latest_prices, get_financial_batch, BEIJING_TZ
