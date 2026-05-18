@@ -57,7 +57,7 @@ for _p in (current_dir, parent_dir):
         sys.path.insert(0, _p)
 
 from kj202512_base import (
-    Strategy, make_logger, get_universe, filter_st, filter_new_stock,
+    Strategy, make_logger, get_universe, filter_st_and_new,
     filter_suspended, filter_limit_up, filter_limit_down,
     get_latest_prices, get_financial_batch, BEIJING_TZ
 )
@@ -75,8 +75,8 @@ EMPTY_MONTHS = [4]   # 4 月空仓
 class XSZStrategy(Strategy):
 
     TOTAL_BUDGET  = 24_000   # 元
-    MAX_SELECT    = 5        # 最多输出候选数
-    MAX_HOLD      = 3        # 最大持股数
+    MAX_SELECT    = 4        # 最多输出候选数
+    MAX_HOLD      = 2        # 最大持股数
     NEW_DAYS      = 400      # 次新股过滤：上市天数
     TOP_PCT       = 0.10     # 每组取前 10%
 
@@ -118,9 +118,15 @@ class XSZStrategy(Strategy):
             LOG.info("===== [小市值] 每周调仓 =====")
             self._run_weekly(week)
 
-        # 14:00 & 14:50 — 涨停打开巡检
-        if t in ('14:00:00', '14:01:00', '14:50:00', '14:51:00'):
+        # 14:00 — 涨停打开巡检（第一次）
+        if '14:00:00' <= t <= '14:02:00' and self.limit_check_14_date != today:
             self.sell_when_limit_up_opened()
+            self.limit_check_14_date = today
+
+        # 14:50 — 涨停打开巡检（第二次）
+        if '14:50:00' <= t <= '14:52:00' and self.limit_check_1450_date != today:
+            self.sell_when_limit_up_opened()
+            self.limit_check_1450_date = today
 
         # 14:45 — 止损巡检（每天一次）
         if t >= '14:45:00' and t <= '14:55:00' and self.trade_date != today:
@@ -130,14 +136,19 @@ class XSZStrategy(Strategy):
     # ── 空仓月清仓 ────────────────────────────
 
     def _close_for_empty_month(self):
+        month = datetime.datetime.now(BEIJING_TZ).month
+        if self.empty_month_closed_month == month:
+            return  # 本月已执行过，防重入
         positions = self.trader.query_stock_positions(self.account)
         if not positions:
+            self.empty_month_closed_month = month
             return
         to_sell = [p.stock_code for p in positions
                    if self.ledger.is_in_ledger(p.stock_code) and p.can_use_volume > 0]
         if to_sell:
-            LOG.info(f"[空仓月] {datetime.datetime.now(BEIJING_TZ).month} 月空仓，清仓: {to_sell}")
+            LOG.info(f"[空仓月] {month} 月空仓，清仓: {to_sell}")
             self._sell_stocks(to_sell, tag='空仓月清仓')
+        self.empty_month_closed_month = month
 
     # ── 核心逻辑 ─────────────────────────────
 
@@ -157,8 +168,7 @@ class XSZStrategy(Strategy):
         # ── Step 1: 基础过滤 ──────────────────
         universe = get_universe()
         LOG.info(f"全 A 股: {len(universe)} 只")
-        universe = filter_st(universe)
-        universe = filter_new_stock(universe, self.NEW_DAYS)
+        universe = filter_st_and_new(universe, self.NEW_DAYS)
         LOG.info(f"过滤 ST & 次新后: {len(universe)} 只")
         universe = filter_suspended(universe)
         LOG.info(f"过滤停牌后: {len(universe)} 只")
@@ -174,6 +184,24 @@ class XSZStrategy(Strategy):
             tables=['PershareIndex', 'Income', 'Balance'],
             start_time='20230101'
         )
+
+        # ── Step 2b: 批量获取252日价格动量 ───────
+        LOG.info("[小市值] 批量获取价格动量数据（252日）...")
+        StockMgr.download_history(universe, period='1d')
+        price_data = xtdata.get_market_data_ex(['close'], universe, period='1d', count=253)
+        price_mom_map = {}
+        for code in universe:
+            try:
+                closes = price_data.get(code, {}).get('close')
+                if closes is None or len(closes) < 253:
+                    continue
+                p_now  = closes.iloc[-1]
+                p_252d = closes.iloc[0]
+                if p_252d > 0:
+                    price_mom_map[code] = p_now / p_252d - 1
+            except Exception:
+                continue
+        LOG.info(f"[小市值] 获得价格动量数据: {len(price_mom_map)} 只")
 
         # ── Step 3: 构建因子 DataFrame ────────
         rows = {}
@@ -209,12 +237,19 @@ class XSZStrategy(Strategy):
                     if total_liab is not None and total_assets and total_assets > 0:
                         da_ratio = total_liab / total_assets
 
-                # 净利润同比增速
-                profit_growth = 0
+                # 净利润同比增速（处理由亏转盈/持续亏损情形）
+                profit_growth = 0.0
                 if len(inc) >= 2:
                     prev_profit = inc.iloc[-2].get('net_profit_incl_min_int_inc_after', 0) or 0
                     if prev_profit > 0:
                         profit_growth = (net_profit - prev_profit) / abs(prev_profit)
+                    elif net_profit > 0:
+                        profit_growth = 1.0   # 由亏转盈，视作高增速
+                    else:
+                        profit_growth = -0.5  # 持续亏损，视作负增速
+
+                # 价格动量（252日收益率，反转效应：负值/低值更好）
+                price_mom = price_mom_map.get(code, np.nan)
 
                 rows[code] = {
                     'roe':          roe,
@@ -222,6 +257,7 @@ class XSZStrategy(Strategy):
                     'net_margin':   net_margin,
                     'da_ratio':     da_ratio,
                     'profit_growth': profit_growth,
+                    'price_mom':    price_mom,
                 }
             except Exception:
                 continue
@@ -231,36 +267,47 @@ class XSZStrategy(Strategy):
             return []
 
         df = pd.DataFrame.from_dict(rows, orient='index')
-        df = df.dropna()
+        # price_mom 允许缺失（历史数据不足的股票），其余因子必须完整
+        df = df.dropna(subset=['roe', 'eps', 'net_margin', 'da_ratio', 'profit_growth'])
         LOG.info(f"[小市值] 有效财务数据: {len(df)} 只")
 
         # ── Step 4: 三组因子，各取前 10% ──────
 
-        top_n = max(1, int(self.TOP_PCT * len(df)))
         final_set = set()
 
-        # 组 1：质量因子（ROE + 净利润率 + EPS，高值优先）
-        g1 = df.copy()
-        g1['score_g1'] = g1['roe'] * 0.5 + g1['net_margin'] * 0.3 + g1['eps'].clip(lower=0) * 0.2
-        g1 = g1[g1['eps'] > 0].sort_values('score_g1', ascending=False)
-        group1_codes = list(g1.index[:top_n])
-        LOG.info(f"[小市值] 组1（质量）取前{top_n}只: {group1_codes[:5]}...")
+        # 组 1：质量因子（ROE + 净利润率 + EPS，高值优先；rank 归一化消除量纲差异）
+        g1 = df[df['eps'] > 0].copy()
+        g1['roe_r']        = g1['roe'].rank(pct=True)
+        g1['net_margin_r'] = g1['net_margin'].rank(pct=True)
+        g1['eps_r']        = g1['eps'].rank(pct=True)
+        g1['score_g1']     = g1['roe_r'] * 0.5 + g1['net_margin_r'] * 0.3 + g1['eps_r'] * 0.2
+        g1 = g1.sort_values('score_g1', ascending=False)
+        top_n_g1 = max(1, int(self.TOP_PCT * len(g1)))
+        group1_codes = list(g1.index[:top_n_g1])
+        LOG.info(f"[小市值] 组1（质量）取前{top_n_g1}只: {group1_codes[:5]}...")
         final_set.update(group1_codes)
 
-        # 组 2：动量因子（利润增速高，负债率低）
-        g2 = df.copy()
-        g2['score_g2'] = g2['profit_growth'] * 0.7 - g2['da_ratio'] * 0.3
-        g2 = g2[g2['eps'] > 0].sort_values('score_g2', ascending=False)
-        group2_codes = list(g2.index[:top_n])
-        LOG.info(f"[小市值] 组2（动量）取前{top_n}只: {group2_codes[:5]}...")
+        # 组 2：动量反转因子（price_mom 低好 + 利润增速高 + 负债率低；rank 归一化）
+        g2 = df[df['eps'] > 0].dropna(subset=['price_mom']).copy()
+        g2['mom_r']    = g2['price_mom'].rank(pct=True, ascending=True)   # 低动量排高分
+        g2['pg_r']     = g2['profit_growth'].rank(pct=True)
+        g2['da_r']     = g2['da_ratio'].rank(pct=True, ascending=True)    # 低负债排高分
+        g2['score_g2'] = (1 - g2['mom_r']) * 0.4 + g2['pg_r'] * 0.4 + (1 - g2['da_r']) * 0.2
+        g2 = g2.sort_values('score_g2', ascending=False)
+        top_n_g2 = max(1, int(self.TOP_PCT * len(g2)))
+        group2_codes = list(g2.index[:top_n_g2])
+        LOG.info(f"[小市值] 组2（动量反转）取前{top_n_g2}只: {group2_codes[:5]}...")
         final_set.update(group2_codes)
 
-        # 组 3：低负债质量（低 D/A + 高净利润率）
-        g3 = df.copy()
-        g3['score_g3'] = -g3['da_ratio'] * 0.6 + g3['net_margin'] * 0.4
-        g3 = g3[g3['eps'] > 0].sort_values('score_g3', ascending=False)
-        group3_codes = list(g3.index[:top_n])
-        LOG.info(f"[小市值] 组3（低负债）取前{top_n}只: {group3_codes[:5]}...")
+        # 组 3：低负债质量（低 D/A + 高净利润率；rank 归一化）
+        g3 = df[df['eps'] > 0].copy()
+        g3['da_r']         = g3['da_ratio'].rank(pct=True, ascending=True)    # 低负债排高分
+        g3['net_margin_r'] = g3['net_margin'].rank(pct=True)
+        g3['score_g3']     = (1 - g3['da_r']) * 0.6 + g3['net_margin_r'] * 0.4
+        g3 = g3.sort_values('score_g3', ascending=False)
+        top_n_g3 = max(1, int(self.TOP_PCT * len(g3)))
+        group3_codes = list(g3.index[:top_n_g3])
+        LOG.info(f"[小市值] 组3（低负债）取前{top_n_g3}只: {group3_codes[:5]}...")
         final_set.update(group3_codes)
 
         LOG.info(f"[小市值] 三组并集: {len(final_set)} 只")

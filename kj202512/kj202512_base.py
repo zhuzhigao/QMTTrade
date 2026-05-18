@@ -34,6 +34,7 @@ BEIJING_TZ = timezone(timedelta(hours=8))
 # ─────────────────────────────────────────────
 # 日志工具
 # ─────────────────────────────────────────────
+_LOG = logging.getLogger('kj202512-base')
 
 def make_logger(name: str) -> logging.Logger:
     logger = logging.getLogger(name)
@@ -96,6 +97,29 @@ def filter_new_stock(stock_list: list, min_days: int) -> list:
                         result.append(code)
                 except Exception:
                     result.append(code)  # 无法解析则不过滤
+    return result
+
+
+def filter_st_and_new(stock_list: list, min_days: int) -> list:
+    """一次遍历同时过滤 ST 和次新股，减少一半 get_instrument_detail 调用"""
+    today = datetime.datetime.now(BEIJING_TZ).date()
+    result = []
+    for code in stock_list:
+        d = xtdata.get_instrument_detail(code)
+        if not d:
+            continue
+        name = d.get('InstrumentName', '')
+        if 'ST' in name or '退' in name or '*' in name:
+            continue
+        open_date_str = d.get('OpenDate', '')
+        if open_date_str:
+            try:
+                open_date = datetime.datetime.strptime(str(open_date_str), '%Y%m%d').date()
+                if (today - open_date).days < min_days:
+                    continue
+            except Exception:
+                pass
+        result.append(code)
     return result
 
 
@@ -168,7 +192,9 @@ def get_financial_batch(stocks: list, tables: list, start_time: str) -> dict:
             )
             result.update(data)
         except Exception as e:
-            pass  # 单批失败不影响其他批次
+            batch_no = i // chunk_size + 1
+            total_batches = (len(stocks) - 1) // chunk_size + 1
+            _LOG.warning(f"[get_financial_batch] 第 {batch_no}/{total_batches} 批查询失败: {e}")
     return result
 
 
@@ -217,6 +243,9 @@ class Strategy:
             'weekly_adjusted_week': -1,
             'stoploss_date': '',
             'trade_date': '',
+            'empty_month_closed_month': -1,
+            'limit_check_14_date': '',
+            'limit_check_1450_date': '',
         })
         self.ledger = StrategyLedger(ledger_file)
         self.pusher = MessagePusher()
@@ -255,6 +284,30 @@ class Strategy:
     def trade_date(self, v: str):
         self.state.set('trade_date', v)
 
+    @property
+    def empty_month_closed_month(self) -> int:
+        return self.state.get('empty_month_closed_month')
+
+    @empty_month_closed_month.setter
+    def empty_month_closed_month(self, v: int):
+        self.state.set('empty_month_closed_month', v)
+
+    @property
+    def limit_check_14_date(self) -> str:
+        return self.state.get('limit_check_14_date')
+
+    @limit_check_14_date.setter
+    def limit_check_14_date(self, v: str):
+        self.state.set('limit_check_14_date', v)
+
+    @property
+    def limit_check_1450_date(self) -> str:
+        return self.state.get('limit_check_1450_date')
+
+    @limit_check_1450_date.setter
+    def limit_check_1450_date(self, v: str):
+        self.state.set('limit_check_1450_date', v)
+
     # ── 止损相关 ──────────────────────────────
 
     def _in_stoploss_silence(self) -> bool:
@@ -264,8 +317,8 @@ class Strategy:
         return (datetime.datetime.now(BEIJING_TZ).date() - sl).days < self.STOPLOSS_SILENCE_DAYS
 
     def check_stoploss(self):
-        """检查持仓是否触发止损，触发则清仓并进入静默期"""
-        if not self.use_stoploss or self._in_stoploss_silence():
+        """检查持仓是否触发止损，触发则清仓并进入静默期（静默期内仍继续巡检）"""
+        if not self.use_stoploss:
             return
         positions = self.trader.query_stock_positions(self.account)
         if not positions:
@@ -370,11 +423,11 @@ class Strategy:
         return sold
 
     def _buy_stocks(self, target_list: list, max_hold: int):
-        """按等权买入 target_list 前 max_hold 只（扣除已持仓）"""
+        """按等权买入 target_list 前 max_hold 只（扣除已持仓及其市值）"""
         positions = self.trader.query_stock_positions(self.account)
-        hold_codes = {p.stock_code for p in positions
-                      if self.ledger.is_in_ledger(p.stock_code) and p.volume > 0} \
-            if positions else set()
+        pos_list = positions if positions else []
+        hold_codes = {p.stock_code for p in pos_list
+                      if self.ledger.is_in_ledger(p.stock_code) and p.volume > 0}
 
         buy_list = [c for c in target_list[:max_hold] if c not in hold_codes]
         slots = max_hold - len(hold_codes)
@@ -388,10 +441,18 @@ class Strategy:
             self.log.warning("[买入] 获取资产失败，跳过")
             return
 
-        budget = min(asset.cash, self.total_budget)
+        # 扣除已持仓市值，剩余才是本次可用预算
+        hold_mv = sum(p.market_value for p in pos_list
+                      if self.ledger.is_in_ledger(p.stock_code) and p.volume > 0)
+        remaining_budget = max(0.0, self.total_budget - hold_mv)
+        budget = min(asset.cash, remaining_budget)
+        if budget < 100:
+            self.log.info(f"[买入] 剩余预算不足（总预算:{self.total_budget:.0f} 已持仓市值:{hold_mv:.0f}），跳过")
+            return
+
         per_stock = budget * 0.98 / len(buy_list)
-        self.log.info(f"[买入] 可用现金:{asset.cash:.0f}  本次预算:{budget:.0f}  "
-                      f"标的数:{len(buy_list)}  每只:{per_stock:.0f}")
+        self.log.info(f"[买入] 可用现金:{asset.cash:.0f}  已持仓市值:{hold_mv:.0f}  "
+                      f"剩余预算:{budget:.0f}  标的数:{len(buy_list)}  每只:{per_stock:.0f}")
 
         prices = get_latest_prices(buy_list)
         for code in buy_list:

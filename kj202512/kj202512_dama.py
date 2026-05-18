@@ -38,7 +38,7 @@ for _p in (current_dir, parent_dir):
         sys.path.insert(0, _p)
 
 from kj202512_base import (
-    Strategy, make_logger, get_universe, filter_st,
+    Strategy, make_logger, get_universe, filter_st_and_new,
     filter_suspended, filter_limit_up, filter_limit_down,
     get_latest_prices, get_financial_batch, get_trading_day_of_month, BEIJING_TZ
 )
@@ -90,9 +90,14 @@ class DaMaStrategy(Strategy):
                 LOG.info(f"===== [菜场大妈] 月度调仓（本月第 {td} 个交易日） =====")
                 self._run_monthly(month)
 
-        # 14:00 & 14:50 — 涨停打开巡检
-        if t in ('14:00:00', '14:01:00', '14:50:00', '14:51:00'):
+        # 14:00 & 14:50 — 涨停打开巡检（时间段 + 日期守卫，防止 sleep(3) 漏点）
+        if '14:00:00' <= t < '14:03:00' and self.limit_check_14_date != today:
             self.sell_when_limit_up_opened()
+            self.limit_check_14_date = today
+
+        if '14:50:00' <= t < '14:53:00' and self.limit_check_1450_date != today:
+            self.sell_when_limit_up_opened()
+            self.limit_check_1450_date = today
 
         # 14:45 — 止损巡检（每天一次）
         if t >= '14:45:00' and t <= '14:55:00' and self.trade_date != today:
@@ -103,6 +108,13 @@ class DaMaStrategy(Strategy):
 
     def _run_monthly(self, month: int):
         try:
+            if self._in_stoploss_silence():
+                LOG.info(
+                    f"[菜场大妈] 止损静默期内（止损日:{self.stoploss_date}，"
+                    f"静默{self.STOPLOSS_SILENCE_DAYS}天），跳过本月调仓"
+                )
+                self.monthly_adjusted_month = month
+                return
             target = self._select()
             LOG.info(f"[菜场大妈] 月度选股结果: {target}")
             self.adjust(target, self.MAX_HOLD)
@@ -117,8 +129,8 @@ class DaMaStrategy(Strategy):
         # ── Step 1: 基础过滤 ──────────────────
         universe = get_universe()
         LOG.info(f"全 A 股: {len(universe)} 只")
-        universe = filter_st(universe)
-        LOG.info(f"过滤 ST 后: {len(universe)} 只")
+        universe = filter_st_and_new(universe, 365)
+        LOG.info(f"过滤 ST/次新股后: {len(universe)} 只")
         universe = filter_suspended(universe)
         LOG.info(f"过滤停牌后: {len(universe)} 只")
 
@@ -146,9 +158,12 @@ class DaMaStrategy(Strategy):
                 if ps is None or ps.empty:
                     continue
 
-                dps = ps.iloc[-1].get('s_fa_dps', None)  # 每股现金股息
-                if dps is None or dps <= 0:
+                # 取近 3 期非零 DPS 均值，比单期更稳定
+                dps_col = ps['s_fa_dps'].dropna() if 's_fa_dps' in ps.columns else pd.Series(dtype=float)
+                dps_col = dps_col[dps_col > 0]
+                if dps_col.empty:
                     continue
+                dps = float(dps_col.tail(3).mean())
 
                 price = prices.get(code, 0)
                 if price <= 0:
@@ -183,16 +198,16 @@ class DaMaStrategy(Strategy):
         final = []
         for code in high_div_codes:
             price = prices.get(code, 0)
-            # 已持仓的不受价格限制（避免频繁换仓）
-            if code in holdings or (0 < price < self.MAX_PRICE):
+            # 已持仓放宽至 2× 上限（避免因小幅涨价被迫换仓），超过则不豁免
+            if (code in holdings and 0 < price < self.MAX_PRICE * 2) or (0 < price < self.MAX_PRICE):
                 final.append(code)
-            if len(final) >= self.MAX_SELECT * 3:
+            if len(final) >= self.MAX_SELECT * 6:
                 break
 
         LOG.info(f"[菜场大妈] 价格过滤（<{self.MAX_PRICE}元）后: {len(final)} 只")
 
-        # ── Step 7: 涨跌停过滤 ───────────────
-        prices_final = get_latest_prices(final)
+        # ── Step 7: 涨跌停过滤（复用 Step 2 的 prices，避免重复订阅）──
+        prices_final = {c: prices[c] for c in final if c in prices}
         final = filter_limit_up(final, holdings, prices_final)
         final = filter_limit_down(final, holdings, prices_final)
         final = final[:self.MAX_SELECT]

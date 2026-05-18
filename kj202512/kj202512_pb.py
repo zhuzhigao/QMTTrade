@@ -36,12 +36,25 @@ for _p in (current_dir, parent_dir):
 
 from kj202512_base import (
     Strategy, make_logger, get_universe, filter_st,
-    filter_suspended, filter_limit_up, filter_limit_down,
+    filter_suspended, filter_new_stock, filter_limit_up, filter_limit_down,
     get_latest_prices, get_financial_batch, BEIJING_TZ
 )
 
 LOG = make_logger('kj202512-PB')
 DEBUG = True
+
+def _filter_finance(stock_list: list) -> list:
+    """排除银行、证券、保险、信托等金融行业（其 PB<1 是行业常态，无选股意义）"""
+    result = []
+    for code in stock_list:
+        d = xtdata.get_instrument_detail(code)
+        if d:
+            name = d.get('InstrumentName', '')
+            if any(kw in name for kw in ('银行', '证券', '保险', '信托', '期货')):
+                continue
+        result.append(code)
+    return result
+
 
 # ────────────────────────────────────────────────────
 # PB 策略
@@ -53,6 +66,7 @@ class PBStrategy(Strategy):
     MAX_SELECT     = 3        # 最多输出候选数
     MAX_HOLD       = 1        # 最大持股数
     REBALANCE_DAY  = 1        # 每月第几个自然日之后的首个交易日触发
+    STOPLOSS_LEVEL = 0.15     # 覆盖基类 0.20，持仓集中故收紧至 15%
 
     def __init__(self, trader, account, debug: bool):
         _base = current_dir
@@ -116,16 +130,23 @@ class PBStrategy(Strategy):
         universe = filter_suspended(universe)
         LOG.info(f"过滤停牌后: {len(universe)} 只")
 
+        universe = filter_new_stock(universe, min_days=365)
+        LOG.info(f"过滤次新股后: {len(universe)} 只")
+
+        universe = _filter_finance(universe)
+        LOG.info(f"过滤金融行业后: {len(universe)} 只")
+
         if not universe:
             LOG.warning("[PB策略] 候选股为空，跳过调仓")
             return []
 
         # ── Step 2: 财务数据过滤 ──────────────
         LOG.info("[PB策略] 批量获取财务数据（PershareIndex / Income）...")
+        fin_start = (datetime.datetime.now(BEIJING_TZ) - datetime.timedelta(days=730)).strftime('%Y%m%d')
         fin = get_financial_batch(
             universe,
             tables=['PershareIndex', 'Income'],
-            start_time='20230101'
+            start_time=fin_start
         )
         LOG.info(f"成功获取财务数据: {len(fin)} 只")
 
@@ -181,7 +202,7 @@ class PBStrategy(Strategy):
                 # 营业利润同比 > 0（比较最近两期）
                 if len(income) >= 2:
                     prev_profit = income.iloc[-2].get('net_profit_incl_min_int_inc_after', 0)
-                    if prev_profit > 0 and net_profit <= prev_profit:
+                    if prev_profit <= 0 or net_profit <= prev_profit:
                         continue
 
                 candidates.append({
