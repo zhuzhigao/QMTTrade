@@ -157,7 +157,7 @@ class Config:
     # --- 交易设置 ---
     check_time = "14:50:00"     # 每日调仓检查时间
 
-    policy_asset = 90000
+    policy_asset = 60000
 
 
 

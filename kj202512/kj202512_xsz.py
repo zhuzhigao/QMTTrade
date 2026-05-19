@@ -187,7 +187,7 @@ class XSZStrategy(Strategy):
 
         # ── Step 2b: 批量获取252日价格动量 ───────
         LOG.info("[小市值] 批量获取价格动量数据（252日）...")
-        StockMgr.download_history(universe, period='1d')
+        StockMgr.download_history(universe, start_time='20240601', period='1d')
         price_data = xtdata.get_market_data_ex(['close'], universe, period='1d', count=253)
         price_mom_map = {}
         for code in universe:

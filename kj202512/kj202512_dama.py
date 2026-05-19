@@ -158,12 +158,12 @@ class DaMaStrategy(Strategy):
                 if ps is None or ps.empty:
                     continue
 
-                # 取近 3 期非零 DPS 均值，比单期更稳定
+                # 取最近一期非零 DPS（均值会混合年报与半年报，导致每年分红两次的公司被低估）
                 dps_col = ps['s_fa_dps'].dropna() if 's_fa_dps' in ps.columns else pd.Series(dtype=float)
                 dps_col = dps_col[dps_col > 0]
                 if dps_col.empty:
                     continue
-                dps = float(dps_col.tail(3).mean())
+                dps = float(dps_col.iloc[-1])
 
                 price = prices.get(code, 0)
                 if price <= 0:

@@ -17,7 +17,8 @@ kj202512_etf.py — ETF 轮动子策略（独立运行）
 
 执行计划（对应原聚宽 run_daily）：
   - 09:35：每日计算分数，若目标 ETF 变化则调仓
-  - 14:45：涨停打开巡检（ETF 一般无涨停，保留逻辑备用）
+  - 14:30：ETF 止损巡检（跌幅 ≥ 8% 强制切换至国债）
+  - 14:50：涨停打开巡检（ETF 一般无涨停，保留逻辑备用）
 
 运行方式：python kj202512_etf.py [-m REAL]
 """
@@ -63,6 +64,7 @@ class ETFStrategy(Strategy):
     RSRS_N        = 18        # RSRS 短窗口
     RSRS_M        = 250       # RSRS 历史基准窗口
     STOPLOSS_ETF  = 0.08      # ETF 持仓亏损 8% 强制切换至国债
+    COOL_DAYS     = 20        # 换仓冷却期（交易日），防止频繁轮动
     BOND_ETF      = '511010.SH'
 
     ETF_POOL = [
@@ -100,13 +102,15 @@ class ETFStrategy(Strategy):
             LOG.info("===== [ETF轮动] 每日选股 & 调仓 =====")
             self._run_daily(today)
 
-        # 14:30 — ETF 止损巡检
-        if '14:30:00' <= t <= '14:35:00':
+        # 14:30 — ETF 止损巡检（日期守卫，每天只查一次）
+        if '14:30:00' <= t < '14:33:00' and self.limit_check_14_date != today:
             self._check_etf_stoploss()
+            self.limit_check_14_date = today
 
-        # 14:45 — 涨停打开巡检
-        if '14:45:00' <= t <= '14:55:00':
+        # 14:50 — 涨停打开巡检（日期守卫，防止 3 秒轮询重复触发）
+        if '14:50:00' <= t < '14:53:00' and self.limit_check_1450_date != today:
             self.sell_when_limit_up_opened()
+            self.limit_check_1450_date = today
 
     # ── 核心逻辑 ─────────────────────────────
 
@@ -173,6 +177,8 @@ class ETFStrategy(Strategy):
                 LOG.warning(f"[ETF止损] {code} 跌幅 {drop:.1%} ≥ "
                             f"{self.STOPLOSS_ETF:.0%}，强制切换至国债")
                 self.adjust([self.BOND_ETF], self.MAX_HOLD)
+                today = datetime.datetime.now(BEIJING_TZ).strftime('%Y%m%d')
+                self.state.set('last_adjust_date', today)  # 触发冷却期，阻止次日立即切回
                 break  # 每次只处理一只，等下次巡检确认
 
     def _get_rank(self) -> list:

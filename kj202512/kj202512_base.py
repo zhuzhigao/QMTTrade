@@ -361,22 +361,19 @@ class Strategy:
         if not hold_codes:
             return
 
-        # 获取昨日是否涨停
-        data = xtdata.get_market_data_ex(['close'], hold_codes, period='1d', count=2)
+        # 获取昨日收盘价与涨停价（直接用 high_limit 字段，避免 ×1.1 估算误差）
+        data = xtdata.get_market_data_ex(['close', 'high_limit'], hold_codes, period='1d', count=2)
         yesterday_limit_up = []
         for code in hold_codes:
             if code not in data:
                 continue
-            closes = data[code]['close']
-            if len(closes) < 2:
+            closes     = data[code]['close']
+            high_lims  = data[code]['high_limit']
+            if closes.empty or high_lims.empty:
                 continue
-            d = xtdata.get_instrument_detail(code)
-            if not d:
-                continue
-            # 昨日涨停价估算：前收 × 1.1
-            prev_close = closes.iloc[-2]
-            est_high_lim = round(prev_close * 1.1, 2)
-            if abs(closes.iloc[-1] - est_high_lim) / est_high_lim < 0.005:
+            yday_close = closes.iloc[-1]
+            yday_limit = high_lims.iloc[-1]
+            if yday_limit > 0 and abs(yday_close - yday_limit) / yday_limit < 0.001:
                 yesterday_limit_up.append(code)
 
         if not yesterday_limit_up:
@@ -494,7 +491,7 @@ class Strategy:
 
         sells_info = [f"{c} 市值{pos_map[c].market_value:.0f}" for c in sell_codes]
         buys_info = [c for c in target_list[:max_hold]
-                     if c not in pos_map or not self.ledger.is_in_ledger(c)]
+                     if not (c in pos_map and self.ledger.is_in_ledger(c))]
 
         self.log.info(f"[调仓计划] 卖出: {sell_codes}  买入: {buys_info}")
 

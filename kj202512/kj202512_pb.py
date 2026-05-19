@@ -96,9 +96,14 @@ class PBStrategy(Strategy):
             LOG.info("===== [PB策略] 月度调仓 =====")
             self._run_monthly(month)
 
-        # 14:00 & 14:50 — 涨停打开巡检（下午两档）
-        if t in ('14:00:00', '14:01:00', '14:50:00', '14:51:00'):
+        # 14:00 & 14:50 — 涨停打开巡检（时间段 + 日期守卫，防止 sleep(3) 跳过）
+        if '14:00:00' <= t < '14:03:00' and self.limit_check_14_date != today:
             self.sell_when_limit_up_opened()
+            self.limit_check_14_date = today
+
+        if '14:50:00' <= t < '14:53:00' and self.limit_check_1450_date != today:
+            self.sell_when_limit_up_opened()
+            self.limit_check_1450_date = today
 
         # 14:45 — 止损巡检
         if t >= '14:45:00' and t <= '14:55:00' and self.trade_date != today:
