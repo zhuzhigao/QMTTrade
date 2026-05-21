@@ -44,7 +44,6 @@ from kj202512_base import (
 )
 
 LOG = make_logger('kj202512-DaMa')
-DEBUG = True
 
 TRIGGER_TRADING_DAY = 15   # 每月第几个交易日触发调仓
 
@@ -58,7 +57,7 @@ class DaMaStrategy(Strategy):
     MAX_SELECT     = 3        # 最多候选
     MAX_HOLD       = 1        # 最大持仓数
     HIGH_DIV_PCT   = 0.25     # 高股息：取全市场前 25%
-    MAX_PRICE      = 9.0      # 价格上限（元）
+    MAX_PRICE      = 18.0      # 价格上限（元）
 
     def __init__(self, trader, account, debug: bool):
         _base = current_dir
@@ -83,24 +82,24 @@ class DaMaStrategy(Strategy):
         month = now.month
 
         # 10:30 — 月度调仓（第 15 个交易日之后首次）
-        if (t >= '10:30:00'
+        if self.debug or (t >= '10:30:00'
                 and self.monthly_adjusted_month != month):
             td = get_trading_day_of_month()
-            if td >= TRIGGER_TRADING_DAY:
+            if self.debug or td >= TRIGGER_TRADING_DAY:
                 LOG.info(f"===== [菜场大妈] 月度调仓（本月第 {td} 个交易日） =====")
                 self._run_monthly(month)
 
         # 14:00 & 14:50 — 涨停打开巡检（时间段 + 日期守卫，防止 sleep(3) 漏点）
-        if '14:00:00' <= t < '14:03:00' and self.limit_check_14_date != today:
+        if self.debug or ('14:00:00' <= t < '14:03:00' and self.limit_check_14_date != today):
             self.sell_when_limit_up_opened()
             self.limit_check_14_date = today
 
-        if '14:50:00' <= t < '14:53:00' and self.limit_check_1450_date != today:
+        if self.debug or ('14:50:00' <= t < '14:53:00' and self.limit_check_1450_date != today):
             self.sell_when_limit_up_opened()
             self.limit_check_1450_date = today
 
         # 14:45 — 止损巡检（每天一次）
-        if t >= '14:45:00' and t <= '14:55:00' and self.trade_date != today:
+        if self.debug or (t >= '14:45:00' and t <= '14:55:00' and self.trade_date != today):
             self.check_stoploss()
             self.trade_date = today
 
@@ -148,32 +147,32 @@ class DaMaStrategy(Strategy):
         LOG.info(f"成功获取财务数据: {len(fin)} 只")
 
         # ── Step 4: 计算股息率，筛选前 25% ────
+        # PershareIndex 无 DPS 字段，用 get_divid_factors 逐只取近一年现金红利
+        # get_divid_factors(code) 返回 DataFrame，index 为除权日，interest 列为每股现金红利
+        cutoff = (datetime.date.today() - datetime.timedelta(days=365)).strftime('%Y%m%d')
+        total = len(universe)
+
         div_rows = []
-        for code in universe:
+        for idx, code in enumerate(universe):
+            dps, div_yield = 0.0, 0.0
             try:
-                stock_fin = fin.get(code)
-                if not stock_fin:
-                    continue
-                ps = stock_fin.get('PershareIndex')
-                if ps is None or ps.empty:
-                    continue
+                dd = xtdata.get_divid_factors(code)
+                if dd is not None and not dd.empty and 'interest' in dd.columns:
+                    recent = dd[dd.index >= cutoff]
+                    dps = float(recent['interest'].dropna().sum())
+            except Exception:
+                pass
 
-                # 取最近一期非零 DPS（均值会混合年报与半年报，导致每年分红两次的公司被低估）
-                dps_col = ps['s_fa_dps'].dropna() if 's_fa_dps' in ps.columns else pd.Series(dtype=float)
-                dps_col = dps_col[dps_col > 0]
-                if dps_col.empty:
-                    continue
-                dps = float(dps_col.iloc[-1])
-
-                price = prices.get(code, 0)
-                if price <= 0:
-                    continue
-
+            price = prices.get(code, 0)
+            if dps > 0 and price > 0:
                 div_yield = dps / price
                 div_rows.append({'code': code, 'div_yield': div_yield})
 
-            except Exception:
-                continue
+            if (idx + 1) % 5 == 0 or (idx + 1) == total:
+                if div_yield > 0:
+                    print(f"[{idx+1}/{total}] {code}  dps={dps:.4f}  yield={div_yield:.4%}")
+                else:
+                    print(f"[{idx+1}/{total}] {code}  无分红")
 
         if not div_rows:
             LOG.warning("[菜场大妈] 无有效股息率数据，跳过")
@@ -255,6 +254,7 @@ if __name__ == '__main__':
     parser.add_argument('-m', '--mode', type=str, default='DEBUG',
                         help='运行模式: REAL 或 DEBUG（默认DEBUG）')
     args = parser.parse_args()
+    DEBUG = True
 
     if args.mode.upper() == 'REAL':
         LOG.info(">>> [实盘模式] 注意风险！")

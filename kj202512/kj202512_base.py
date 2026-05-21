@@ -54,9 +54,9 @@ def make_logger(name: str) -> logging.Logger:
 
 def get_universe() -> list:
     """获取全 A 股列表（含主板/中小板/创业板，排除 KCBJ）"""
-    stocks = xtdata.get_stock_list_in_sector('沪深A股')
+    stocks = xtdata.get_stock_list_in_sector('000300.SH')
     if not stocks:
-        stocks = xtdata.get_stock_list_in_sector('全部A股')
+        stocks = xtdata.get_stock_list_in_sector('沪深A股')
     return [s for s in stocks if _not_kcbj(s)]
 
 
@@ -138,11 +138,21 @@ def filter_suspended(stock_list: list) -> list:
 
 
 def get_latest_prices(stock_list: list) -> dict:
-    """订阅并获取最新 tick 价格，返回 {code: price}"""
-    for code in stock_list:
-        xtdata.subscribe_quote(code, period='tick', count=1)
-    tick = xtdata.get_full_tick(stock_list)
-    return {code: tick[code].get('lastPrice', 0) for code in stock_list if code in tick}
+    """订阅并获取最新 tick 价格，返回 {code: price}，每批 5 只"""
+    if not stock_list:
+        return {}
+    result = {}
+    batch_size = 5
+    total = len(stock_list)
+    for i in range(0, total, batch_size):
+        batch = stock_list[i:i + batch_size]
+        for code in batch:
+            xtdata.subscribe_quote(code, period='tick', count=1)
+        tick = xtdata.get_full_tick(batch)
+        result.update({code: tick[code].get('lastPrice', 0) for code in batch if code in tick})
+        done = min(i + batch_size, total)
+        print(f"获取 tick 进度：{done}/{total}")
+    return result
 
 
 def filter_limit_up(stock_list: list, holdings: list, prices: dict) -> list:
@@ -398,6 +408,7 @@ class Strategy:
 
     def _sell_stocks(self, codes: list, tag: str = '卖出') -> dict:
         """卖出指定股票列表，返回 {code: pre_sell_market_value}"""
+        
         sold = {}
         positions = self.trader.query_stock_positions(self.account)
         pos_map = {p.stock_code: p for p in positions} if positions else {}

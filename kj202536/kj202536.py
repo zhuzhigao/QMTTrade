@@ -63,8 +63,8 @@ class Config:
     #         '512890.SH': '红利低波ETF'
     #     },
     #     'Core':      {
-    #         '510150.SH': '上证50', 
-    #         '159967.SZ': '创蓝筹', 
+    #         '510050.SH': '上证50',
+    #         '159949.SZ': '创蓝筹',
     #         '588000.SH': '科创50'
     #     },
     #     'Global':    {
@@ -87,10 +87,10 @@ class Config:
     #         '511260.SH': '十年国债ETF' # 也可以把长债放入此处作为防御轮动
     #     },
     #     'Core_Growth': { # 境内核心宽基
-    #         '510150.SH': '上证50', 
+    #         '510050.SH': '上证50',
     #         '588000.SH': '科创50', 
     #         '159845.SZ': '中证1000', # 捕捉小盘行情
-    #         '159967.SZ': '创蓝筹'
+    #         '159949.SZ': '创蓝筹'
     #     },
     #     'Global_Market': { # 全球配置
     #         '513100.SH': '纳指ETF', 
@@ -104,7 +104,7 @@ class Config:
     #     }
     # }
 
-    # --- 资产池配置 (已剔除高估值AI及半导体板块) ---
+    #--- 资产池配置 (已剔除高估值AI及半导体板块) ---
     etf_groups = {
         'Commodity': {
             '518880.SH': '黄金ETF',     # 抗通胀与地缘避险
@@ -112,16 +112,17 @@ class Config:
             '159981.SZ': '能化ETF',     # 保留能化作为大宗商品趋势标的
             '159985.SZ': '豆粕ETF'      # 农产品低相关度标的
         },
-        'Dividend_Value':  { 
+        'Dividend_Value':  {
             '512890.SH': '红低波ETF',   # 红利低波防守
             '515080.SH': '中证红利ETF', # 分散高股息行业，规避单一股票抱团
+            '561560.SH': '电力ETF',     # 高分红公用事业防守
             '511260.SH': '十年国债ETF'  # 固收防御
         },
         'Core_Growth': { 
-            '510150.SH': '上证50',     # 超大盘价值蓝筹
+            '510050.SH': '上证50',     # 超大盘价值蓝筹
             '510300.SH': '沪深300',    # 【优化】替代科创50。A股核心资产，极度稳健，兼顾各行业龙头
             '159845.SZ': '中证1000',    # 小盘宽基（用于捕捉风格切换）
-            '159967.SZ': '创蓝筹'       # 创业板绩优蓝筹
+            '159949.SZ': '创蓝筹'       # 华安创业板50ETF
         },
         'Global_Market': { 
             '513500.SH': '标普500',    # 替代纳指，保留美股科技龙头同时大幅稀释AI权重
@@ -424,7 +425,7 @@ class RobotTrader:
 
                 remark = f"Buy_{name}_{today_str}"
                 if buy_vol > 0:
-                    print(f"【实际买入】{code} | 单价: {current_price} | 数量: {buy_vol}股 | 逻辑: {reason}")
+                    print(f"【实际买入】{code} {name} | 单价: {current_price} | 数量: {buy_vol}股 | 逻辑: {reason}")
                     if not DEBUG:
                         seq = self.trader.order_stock(self.acc, code, xtconstant.STOCK_BUY, buy_vol, xtconstant.FIX_PRICE, current_price, "36_Strategy_Buy", remark)
                         if seq != -1:
