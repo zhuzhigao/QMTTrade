@@ -87,6 +87,12 @@ class ETFStrategy(Strategy):
         )
         if not self.state.get('last_adjust_date'):
             self.state.set('last_adjust_date', '')
+        # DEBUG 模式：每次重启清空日期守卫，确保所有模块在启动后立即可触发
+        if debug:
+            self.trade_date = ''
+            self.limit_check_14_date = ''
+            self.limit_check_1450_date = ''
+            LOG.info("[DEBUG] 日期守卫已重置，所有模块本次启动后立即触发")
         LOG.info(f"ETF轮动策略初始化完成，预算 {self.TOTAL_BUDGET:,} 元，"
                  f"标的池: {self.ETF_POOL}")
 
@@ -98,17 +104,18 @@ class ETFStrategy(Strategy):
         today = now.strftime('%Y%m%d')
 
         # 09:35 — 每日选股 + 调仓（每天最多执行一次）
-        if t >= '09:35:00' and self.trade_date != today:
+        # DEBUG 模式跳过时间窗口，任意时刻可触发
+        if (self.debug or t >= '09:35:00') and self.trade_date != today:
             LOG.info("===== [ETF轮动] 每日选股 & 调仓 =====")
             self._run_daily(today)
 
         # 14:30 — ETF 止损巡检（日期守卫，每天只查一次）
-        if '14:30:00' <= t < '14:33:00' and self.limit_check_14_date != today:
+        if (self.debug or '14:30:00' <= t < '14:33:00') and self.limit_check_14_date != today:
             self._check_etf_stoploss()
             self.limit_check_14_date = today
 
         # 14:50 — 涨停打开巡检（日期守卫，防止 3 秒轮询重复触发）
-        if '14:50:00' <= t < '14:53:00' and self.limit_check_1450_date != today:
+        if (self.debug or '14:50:00' <= t < '14:53:00') and self.limit_check_1450_date != today:
             self.sell_when_limit_up_opened()
             self.limit_check_1450_date = today
 
@@ -116,6 +123,9 @@ class ETFStrategy(Strategy):
 
     def _in_cool_period(self, today: str) -> bool:
         """距上次换仓不足 COOL_DAYS 个交易日则返回 True"""
+        if self.debug:
+            LOG.info("[冷却期] DEBUG模式，跳过冷却期检查")
+            return False
         last = self.state.get('last_adjust_date')
         if not last:
             return False
@@ -349,6 +359,8 @@ if __name__ == '__main__':
     try:
         while True:
             strategy.handlebar()
+            if DEBUG: 
+                break
             time.sleep(3)
     except KeyboardInterrupt:
         LOG.info("收到停止信号，断开连接...")

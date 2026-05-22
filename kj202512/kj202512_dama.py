@@ -288,6 +288,8 @@ if __name__ == '__main__':
     try:
         while True:
             strategy.handlebar()
+            if DEBUG:
+                break;
             time.sleep(3)
     except KeyboardInterrupt:
         LOG.info("收到停止信号，断开连接...")
