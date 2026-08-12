@@ -313,5 +313,5 @@ if __name__ == '__main__':
     
     # print("\n🎉 所有数据更新程序执行完毕！")
    
-    #time.sleep(3) # 模块间休眠
+    # #time.sleep(3) # 模块间休眠
     download_xtquant_data() 

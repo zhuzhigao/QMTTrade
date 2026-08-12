@@ -1,10 +1,15 @@
 import os
 import json
 import datetime
+import threading
+import msvcrt
 import requests
 from datetime import timezone, timedelta
 
-__all__ = ['StrategyLedger', 'BlacklistManager', 'MessagePusher', 'StateManager', 'DateMgr']
+__all__ = [
+    'StrategyLedger', 'StrategyVolumeLedger', 'SingleInstanceLock',
+    'BlacklistManager', 'MessagePusher', 'StateManager', 'DateMgr'
+]
 
 BEIJING_TZ = timezone(timedelta(hours=8))
 
@@ -150,6 +155,162 @@ class StrategyLedger:
     def get_all(self):
         """获取当前策略名下的所有股票"""
         return self.holdings
+
+
+class StrategyVolumeLedger:
+    """按证券代码记录策略实际成交份数的持久化账本。"""
+
+    def __init__(self, filepath):
+        self.filepath = os.path.abspath(filepath)
+        self._lock = threading.RLock()
+        self.initialized = False
+        self.load_error = None
+        self.holdings = self._load()
+
+    def _load(self):
+        if not os.path.exists(self.filepath):
+            return {}
+        try:
+            with open(self.filepath, 'r', encoding='utf-8') as f:
+                saved = json.load(f)
+            if not isinstance(saved, dict):
+                raise ValueError('账本格式必须是 {证券代码: 份数}')
+
+            holdings = {}
+            for stock_code, volume in saved.items():
+                volume = int(volume)
+                if volume > 0:
+                    holdings[str(stock_code)] = volume
+            self.initialized = True
+            return holdings
+        except Exception as e:
+            self.load_error = str(e)
+            print(f"读取策略份数账本失败: {e}，REAL 模式将拒绝启动")
+            return {}
+
+    def _save(self):
+        directory = os.path.dirname(self.filepath)
+        if directory:
+            os.makedirs(directory, exist_ok=True)
+        temp_path = self.filepath + '.tmp'
+        with open(temp_path, 'w', encoding='utf-8') as f:
+            json.dump(self.holdings, f, ensure_ascii=False, indent=4, sort_keys=True)
+        os.replace(temp_path, self.filepath)
+        self.initialized = True
+        self.load_error = None
+
+    @staticmethod
+    def parse_positions(spec):
+        """解析 ``代码=份数,代码=份数``；``empty`` 表示空账本。"""
+        spec = (spec or '').strip()
+        if not spec or spec.lower() == 'empty':
+            return {}
+
+        positions = {}
+        for item in spec.split(','):
+            try:
+                stock_code, volume_text = (part.strip() for part in item.split('=', 1))
+                volume = int(volume_text)
+            except (ValueError, TypeError):
+                raise ValueError(f"无效账本项目: {item!r}，应使用 代码=份数")
+            if not stock_code or volume <= 0:
+                raise ValueError(f"无效账本项目: {item!r}，代码不能为空且份数必须为正整数")
+            if stock_code in positions:
+                raise ValueError(f"账本代码重复: {stock_code}")
+            positions[stock_code] = volume
+        return positions
+
+    def initialize(self, positions=None, overwrite=False):
+        """显式初始化账本；默认不允许覆盖已存在的有效账本。"""
+        with self._lock:
+            if self.initialized and not overwrite:
+                raise FileExistsError(f"账本已存在: {self.filepath}；如确认覆盖请使用 --force-init-ledger")
+            normalized = {}
+            for stock_code, volume in (positions or {}).items():
+                volume = int(volume)
+                if not stock_code or volume <= 0:
+                    raise ValueError(f"无效持仓: {stock_code}={volume}")
+                normalized[str(stock_code)] = volume
+            self.holdings = normalized
+            self._save()
+
+    def get(self, stock_code):
+        with self._lock:
+            return int(self.holdings.get(stock_code, 0))
+
+    def get_all(self):
+        with self._lock:
+            return dict(self.holdings)
+
+    def record_buy(self, stock_code, volume):
+        volume = int(volume)
+        if volume <= 0:
+            return
+        with self._lock:
+            if not self.initialized:
+                raise RuntimeError(f"策略份数账本尚未初始化: {self.filepath}")
+            self.holdings[stock_code] = self.get(stock_code) + volume
+            self._save()
+
+    def record_sell(self, stock_code, volume):
+        volume = int(volume)
+        if volume <= 0:
+            return
+        with self._lock:
+            if not self.initialized:
+                raise RuntimeError(f"策略份数账本尚未初始化: {self.filepath}")
+            remaining = max(0, self.get(stock_code) - volume)
+            if remaining:
+                self.holdings[stock_code] = remaining
+            else:
+                self.holdings.pop(stock_code, None)
+            self._save()
+
+
+class SingleInstanceLock:
+    """Windows 跨进程非阻塞文件锁；锁文件保留，但锁随文件句柄释放。"""
+
+    def __init__(self, filepath):
+        self.filepath = os.path.abspath(filepath)
+        self._file = None
+
+    def acquire(self):
+        if self._file is not None:
+            return True
+        directory = os.path.dirname(self.filepath)
+        if directory:
+            os.makedirs(directory, exist_ok=True)
+        lock_file = open(self.filepath, 'a+b')
+        try:
+            lock_file.seek(0, os.SEEK_END)
+            if lock_file.tell() == 0:
+                lock_file.write(b'0')
+                lock_file.flush()
+            lock_file.seek(0)
+            msvcrt.locking(lock_file.fileno(), msvcrt.LK_NBLCK, 1)
+        except OSError:
+            lock_file.close()
+            return False
+        self._file = lock_file
+        return True
+
+    def release(self):
+        if self._file is None:
+            return
+        try:
+            self._file.seek(0)
+            msvcrt.locking(self._file.fileno(), msvcrt.LK_UNLCK, 1)
+        finally:
+            self._file.close()
+            self._file = None
+
+    def __enter__(self):
+        if not self.acquire():
+            raise RuntimeError(f"已有策略实例持有锁: {self.filepath}")
+        return self
+
+    def __exit__(self, exc_type, exc_value, traceback):
+        self.release()
     
 
 class DateMgr:

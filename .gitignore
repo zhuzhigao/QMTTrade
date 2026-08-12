@@ -24,3 +24,4 @@ strat*.html
 *.log
 userdata/
 *.hdf5
+*.lock

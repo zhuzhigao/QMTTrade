@@ -16,7 +16,7 @@ import numpy as np
 import pandas as pd
 from scipy import stats
 from xtquant import xtdata,xtconstant
-from xtquant.xttrader import XtQuantTrader
+from xtquant.xttrader import XtQuantTrader, XtQuantTraderCallback
 
 # 获取当前脚本的绝对路径
 current_dir = os.path.dirname(os.path.abspath(__file__))
@@ -27,12 +27,15 @@ parent_dir = os.path.dirname(current_dir)
 if parent_dir not in sys.path:
     sys.path.append(parent_dir)
 
-from utils.utilities import MessagePusher
+from utils.utilities import MessagePusher, StrategyVolumeLedger, SingleInstanceLock
 from utils.marketmgr import MarketMgr
 from utils.stockmgr import StockMgr
 
 BEIJING_TZ = timezone(timedelta(hours=8))
 DEBUG = False
+
+STRATEGY_BUY_TAG = "36_Strategy_Buy"
+STRATEGY_SELL_TAG = "36_Strategy_Sell"
 
 class XtStockAccount:
     """
@@ -42,6 +45,31 @@ class XtStockAccount:
     def __init__(self, account_id, account_type=2): # 这里改为 2
         self.account_id = account_id
         self.account_type = account_type
+
+
+class Strategy36Callback(XtQuantTraderCallback):
+    """只根据 36 号订单的实际成交回报更新独立份数账本。"""
+
+    def __init__(self, ledger):
+        super().__init__()
+        self.ledger = ledger
+
+    def on_disconnected(self):
+        print(">>> 警告：与 QMT 交易服务器连接断开")
+
+    def on_stock_trade(self, trade):
+        strategy_name = getattr(trade, 'strategy_name', '')
+        stock_code = getattr(trade, 'stock_code', '')
+        traded_volume = int(getattr(trade, 'traded_volume', 0) or 0)
+
+        if not stock_code or traded_volume <= 0:
+            return
+        if strategy_name == STRATEGY_BUY_TAG:
+            self.ledger.record_buy(stock_code, traded_volume)
+            print(f">>> [36号账本] 买入成交 {stock_code} +{traded_volume}，策略持仓 {self.ledger.get(stock_code)}")
+        elif strategy_name == STRATEGY_SELL_TAG:
+            self.ledger.record_sell(stock_code, traded_volume)
+            print(f">>> [36号账本] 卖出成交 {stock_code} -{traded_volume}，策略持仓 {self.ledger.get(stock_code)}")
 
 # ======================== 1. 策略配置 ========================
 class Config:
@@ -130,8 +158,8 @@ class Config:
         },
         'Sector_Alpha': { 
             '515260.SH': '电子ETF',     # 替代纯半导体，泛科技化以平滑芯片周期波动
-            '159892.SZ': '恒生医疗', 
-            '512660.SH': '军工ETF'
+            '561560.SH': '恒生医疗',
+            '512660.SH': '军工ETF',
         }
     }
 
@@ -229,10 +257,12 @@ def get_momentum_score(code):
 # ======================== 3. 交易执行引擎 ========================
 
 class RobotTrader:
-    def __init__(self):
+    def __init__(self, ledger=None):
         self.trader = XtQuantTrader(Config.qmt_path, Config.session_id)
         self.acc = XtStockAccount(Config.acc_id)
         self.pusher = MessagePusher()
+        self.ledger = ledger or StrategyVolumeLedger(os.path.join(current_dir, 'kj202536_holdings.json'))
+        self.trader.register_callback(Strategy36Callback(self.ledger))
         
     def connect(self):
         self.trader.start()
@@ -240,6 +270,7 @@ class RobotTrader:
         if res == 0:
             print(f">>> 已连接金阳光终端 | 账号: {self.acc}")
             self.trader.subscribe(self.acc)
+            print(f">>> 36号独立持仓账本: {self.ledger.get_all()}")
             return True
         else:
             print(">>> 连接失败，请检查QMT是否开启极简模式交易！")
@@ -316,11 +347,15 @@ class RobotTrader:
 
     def sync_orders(self, target_list):
         positions = self.trader.query_stock_positions(self.acc)
-        current_holdings = {
+        if positions is None:
+            print(">>> 无法查询账户持仓，为保护手工及其他策略仓位，本轮停止下单")
+            return
+        account_holdings = {
             p.stock_code: p
             for p in positions
-            if p.volume > 0 and p.stock_code in Config.all_symbols
+            if p.volume > 0
         }
+        strategy_holdings = self.ledger.get_all()
 
         buy_records = []
         sell_records = []
@@ -334,10 +369,20 @@ class RobotTrader:
 
         # ===== A. 卖出（调出目标池 + 超配减仓）=====
         full_sell_codes = set()  # 用于轮询等待全仓清零
-        for code, pos in current_holdings.items():
+        for code, owned_volume in strategy_holdings.items():
             sell_vol = 0
             reason = ""
             try:
+                pos = account_holdings.get(code)
+                if pos is None:
+                    print(f"  !! {code} 账本持有 {owned_volume} 股，但账户已无该持仓；为避免误卖，本轮跳过并保留账本待核对")
+                    continue
+                if pos.volume < owned_volume:
+                    print(
+                        f"  !! {code} 账本持有 {owned_volume} 股，但账户合计仅 {pos.volume} 股；"
+                        "归属已不一致，为避免卖到手工或其他策略仓位，本轮禁止卖出"
+                    )
+                    continue
                 tick = xtdata.get_full_tick([code])
                 if code not in tick or tick[code]['lastPrice'] <= 0:
                     print(f"  -> 获取 {code} 最新价失败，跳过卖出检查")
@@ -345,14 +390,15 @@ class RobotTrader:
                 current_price = tick[code]['lastPrice']
 
                 if code not in target_list:
-                    sell_vol = pos.can_use_volume
+                    sell_vol = min(owned_volume, pos.can_use_volume)
                     reason = "调出目标池"
                 else:
-                    current_value = pos.volume * current_price
+                    current_value = owned_volume * current_price
                     if current_value > target_value_per_slot * (1 + rebalance_tolerance):
                         excess_value = current_value - target_value_per_slot
                         sell_vol = min(
                             int(excess_value / current_price / 100) * 100,
+                            owned_volume,
                             pos.can_use_volume
                         )
                         reason = f"超配减仓(市值:{current_value:.0f} 目标:{target_value_per_slot:.0f})"
@@ -366,7 +412,7 @@ class RobotTrader:
                 remark = f"Sell_{name}_{today_str}"
                 print(f"【准备卖出】{code} | 单价: {current_price} | 数量: {sell_vol}股 | 逻辑: {reason}")
                 if not DEBUG:
-                    seq = self.trader.order_stock(self.acc, code, xtconstant.STOCK_SELL, sell_vol, xtconstant.FIX_PRICE, current_price, "36_Strategy_Sell", remark)
+                    seq = self.trader.order_stock(self.acc, code, xtconstant.STOCK_SELL, sell_vol, xtconstant.FIX_PRICE, current_price, STRATEGY_SELL_TAG, remark)
                     if seq != -1:
                         sell_records.append(f"{name}({code}) | 数量: {sell_vol} | {reason}")
                         if code not in target_list:
@@ -374,14 +420,14 @@ class RobotTrader:
             except Exception as e:
                 print(f"  -> {code} 卖出处理报错: {e}")
 
-        # 等待全仓卖出成交（最多 120 秒）
+        # 等待 36 号账本中的目标持仓卖出成交（最多 120 秒）。
+        # 不能等待账户持仓清零，因为同代码可能还属于手工或其他策略。
         if full_sell_codes and not DEBUG:
             deadline = datetime.datetime.now(BEIJING_TZ) + datetime.timedelta(seconds=120)
             print(f"  -> 等待全仓卖出成交: {full_sell_codes}")
             while datetime.datetime.now(BEIJING_TZ) < deadline:
                 time.sleep(3)
-                positions = self.trader.query_stock_positions(self.acc)
-                still_holding = {p.stock_code for p in positions if p.stock_code in full_sell_codes and p.volume > 0}
+                still_holding = {code for code in full_sell_codes if self.ledger.get(code) > 0}
                 if not still_holding:
                     print(f"  -> 卖出已全部成交。")
                     break
@@ -390,14 +436,12 @@ class RobotTrader:
                 print(f"  !! 超时 120 秒仍有未成交卖单，继续执行买入（可用现金以实际为准）。")
 
         # ===== B. 买入（新标的 + 欠配补仓）=====
-        # 重新查询最新持仓，确保拿到卖出后的最新状态
-        positions = self.trader.query_stock_positions(self.acc)
-        current_holdings = {
-            p.stock_code: p
-            for p in positions
-            if p.volume > 0 and p.stock_code in Config.all_symbols
-        }
+        # 买入计算只读取 36 号独立账本，不读取账户聚合持仓。
+        strategy_holdings = self.ledger.get_all()
         asset = self.trader.query_stock_asset(self.acc)
+        if asset is None:
+            print(">>> 无法查询账户资产，为避免错误下单，本轮停止买入")
+            return
         print(f"账户总资产: {asset.total_asset:.2f} | 可用现金: {asset.cash:.2f}")
 
         for code in target_list:
@@ -409,9 +453,9 @@ class RobotTrader:
                 current_price = tick[code]['lastPrice']
                 name = Config.symbol_to_name.get(code, code)
 
-                if code in current_holdings:
-                    pos = current_holdings[code]
-                    current_value = pos.volume * current_price
+                owned_volume = strategy_holdings.get(code, 0)
+                if owned_volume > 0:
+                    current_value = owned_volume * current_price
                     if current_value < target_value_per_slot * (1 - rebalance_tolerance):
                         diff_value = target_value_per_slot - current_value
                         buy_vol = int(diff_value / current_price / 100) * 100
@@ -427,7 +471,7 @@ class RobotTrader:
                 if buy_vol > 0:
                     print(f"【实际买入】{code} {name} | 单价: {current_price} | 数量: {buy_vol}股 | 逻辑: {reason}")
                     if not DEBUG:
-                        seq = self.trader.order_stock(self.acc, code, xtconstant.STOCK_BUY, buy_vol, xtconstant.FIX_PRICE, current_price, "36_Strategy_Buy", remark)
+                        seq = self.trader.order_stock(self.acc, code, xtconstant.STOCK_BUY, buy_vol, xtconstant.FIX_PRICE, current_price, STRATEGY_BUY_TAG, remark)
                         if seq != -1:
                             buy_records.append(f"{name}({code}) | 价格: {current_price} | 数量: {buy_vol} | {reason}")
                 else:
@@ -439,6 +483,10 @@ class RobotTrader:
 
     def loop(self):
         print(f">>> 交易机器人已启动 (当前北京时间: {datetime.datetime.now(BEIJING_TZ).strftime('%H:%M:%S')})")
+
+        z = MarketMgr.get_rsrs_signal(Config.index_code, Config.rsrs_n, Config.rsrs_m)
+        print(f"当前 RSRS Z-Score: {z:.2f}")
+
         last_run_date = ""
         while True:
             now_dt = datetime.datetime.now(BEIJING_TZ)
@@ -458,6 +506,14 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="金阳光 QMT 极简模式策略36 启动器")
     
     parser.add_argument('-m', '--mode', type=str, help='运行模式: REAL 或 DEBUG')
+    parser.add_argument(
+        '--init-ledger', metavar='POSITIONS',
+        help='初始化份数账本并退出，例如 "518880.SH=1000,511010.SH=500"；空账本用 empty'
+    )
+    parser.add_argument(
+        '--force-init-ledger', action='store_true',
+        help='允许 --init-ledger 覆盖已有账本（请谨慎使用）'
+    )
     
     # 3. 解析命令行参数
     args = parser.parse_args()
@@ -469,6 +525,33 @@ if __name__ == "__main__":
     else:
         print(">>> 当前处于 [DEBUG 调试模式]：仅输出日志，不触发真实报单。")
         DEBUG = True
-    bot = RobotTrader()
-    if bot.connect():
-        bot.loop()
+    ledger = StrategyVolumeLedger(os.path.join(current_dir, 'kj202536_holdings.json'))
+    instance_lock = SingleInstanceLock(os.path.join(current_dir, 'kj202536.lock'))
+    if not instance_lock.acquire():
+        print('>>> 启动失败：36号策略已有一个实例正在运行。')
+        sys.exit(2)
+
+    try:
+        if args.init_ledger is not None:
+            try:
+                positions = StrategyVolumeLedger.parse_positions(args.init_ledger)
+                unknown_codes = set(positions) - set(Config.all_symbols)
+                if unknown_codes:
+                    raise ValueError(f"以下代码不在36号资产池中: {sorted(unknown_codes)}")
+                ledger.initialize(positions, overwrite=args.force_init_ledger)
+                print(f">>> 36号账本初始化完成: {ledger.filepath} | {ledger.get_all()}")
+            except (ValueError, FileExistsError) as e:
+                print(f">>> 36号账本初始化失败: {e}")
+                sys.exit(2)
+            sys.exit(0)
+
+        if not DEBUG and not ledger.initialized:
+            reason = f"账本损坏: {ledger.load_error}" if ledger.load_error else '账本尚未初始化'
+            print(f">>> REAL 模式拒绝启动：{reason}。请先使用 --init-ledger 初始化。")
+            sys.exit(2)
+
+        bot = RobotTrader(ledger)
+        if bot.connect():
+            bot.loop()
+    finally:
+        instance_lock.release()

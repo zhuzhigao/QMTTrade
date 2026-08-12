@@ -121,7 +121,31 @@ def _fetch_ohlc(symbol: str, count: int, max_retries: int = 3) -> pd.DataFrame:
             print(f"  [重试 {attempt + 1}/{max_retries}] {bare} 请求失败，{wait}s 后重试... ({e})")
             time.sleep(wait)
 
-    raise RuntimeError(f"{symbol} 连续 {max_retries} 次请求失败: {last_err}")
+    # 东方财富连续失败后，切换到 AKShare 的新浪港股历史行情接口。
+    # stock_hk_daily 返回的字段已经是英文，只需统一日期、排序和截取数量。
+    print(f"  [备用数据源] {bare} 东方财富连续失败，切换新浪财经...")
+    try:
+        df = ak.stock_hk_daily(symbol=bare, adjust="qfq")
+        required_columns = {'date', 'high', 'low', 'close'}
+        missing_columns = required_columns.difference(df.columns)
+        if missing_columns:
+            raise ValueError(f"新浪返回数据缺少字段: {sorted(missing_columns)}")
+
+        df = df.copy()
+        df['date'] = pd.to_datetime(df['date'])
+        df = df[
+            (df['date'] >= pd.Timestamp(start_dt.date()))
+            & (df['date'] <= pd.Timestamp(end_dt.date()))
+        ]
+        df = df.sort_values('date').tail(count).reset_index(drop=True)
+        if df.empty:
+            raise ValueError("新浪返回空数据")
+        return df[['date', 'high', 'low', 'close']]
+    except Exception as sina_err:
+        raise RuntimeError(
+            f"{symbol} 东方财富连续 {max_retries} 次请求失败 ({last_err}); "
+            f"新浪备用接口也失败 ({sina_err})"
+        ) from sina_err
 
 
 # ======================== 3. 核心算法 ========================

@@ -6,7 +6,7 @@ kj202590 — 固收+ ETF 再平衡策略 (QMT Mini 版)
 作者：开心果 / QMT 移植：本项目
 
 策略逻辑：
-  固定权重配置国债/黄金/红利/纳指四只 ETF，每日 09:35 检查持仓偏差。
+  固定权重配置国债/黄金/红利/纳指四只 ETF，每日 14:35 检查持仓偏差。
   当某只 ETF 的实际市值偏离目标权重超过 rebalance_threshold（默认 15%）
   且偏差份数超过 rebalance_min_shares（默认 100 份）时，触发再平衡下单。
   卖出先于买入，以释放资金给后续买入操作。
@@ -30,13 +30,15 @@ from xtquant.xttrader import XtQuantTrader, XtQuantTraderCallback
 from xtquant.xttype import StockAccount
 import xtquant.xtconstant as xtconstant
 
-from utils.utilities import StrategyLedger, MessagePusher
+from utils.utilities import StrategyVolumeLedger, SingleInstanceLock, MessagePusher
 from utils.stockmgr import StockMgr
-from utils.trademgr import TradeMgr
 
 # ================= 1. 全局配置 =================
 
 BEIJING_TZ = timezone(timedelta(hours=8))
+
+STRATEGY_BUY_TAG = '90_Strategy_Buy'
+STRATEGY_SELL_TAG = '90_Strategy_Sell'
 
 
 class Config:
@@ -50,10 +52,10 @@ class Config:
     # ── 目标权重 ─────────────────────────────────────────────────
     # 代码格式：QMT 格式（.SH/.SZ）
     weights: dict = {
-        '511010.SH': 0.70,   # 国债ETF  —— 底仓，提供稳定固息收益
-        '518880.SH': 0.14,   # 黄金ETF  —— 对冲风险资产
-        '510880.SH': 0.08,   # 红利ETF  —— A 股分红收益增强
-        '513100.SH': 0.08,   # 纳指ETF  —— 全球权益弹性暴露
+        '511010.SH': 0.65,   # 国债ETF  —— 底仓，提供稳定固息收益
+        '518880.SH': 0.15,   # 黄金ETF  —— 对冲风险资产
+        '510880.SH': 0.1,   # 红利ETF  —— A 股分红收益增强
+        '513100.SH': 0.1,   # 纳指ETF  —— 全球权益弹性暴露
     }
 
     # ── 再平衡触发阈值 ────────────────────────────────────────────
@@ -74,24 +76,40 @@ class Config:
 # ================= 2. 运行时全局变量 =================
 
 class GlobalVar:
-    # StrategyLedger：记录本策略买入的 ETF，防止与账户中手动持有的相同 ETF 混淆
-    strategy_ledger = StrategyLedger('kj202590_holdings.json')
+    # 按实际成交份数记录，路径固定在策略目录，不受启动工作目录影响。
+    strategy_ledger = StrategyVolumeLedger(os.path.join(current_dir, 'kj202590_holdings.json'))
 
 
 # ================= 3. 交易回调 =================
 
 class MyCallback(XtQuantTraderCallback):
+    def __init__(self, ledger):
+        super().__init__()
+        self.ledger = ledger
+
     def on_disconnected(self):
         print("警告：交易服务器连接断开！")
 
     def on_stock_order(self, order):
         print(
-            f"[订单] {order.stock_code} | 状态: {order.order_status_msg} "
-            f"| 成交均价: {order.traded_price:.4f} | 成交量: {order.traded_volume}"
+            f"[订单] {order.stock_code} | 状态: {getattr(order, 'status_msg', '')} "
+            f"| 成交均价: {getattr(order, 'traded_price', 0.0):.4f} "
+            f"| 成交量: {getattr(order, 'traded_volume', 0)}"
         )
 
     def on_stock_trade(self, trade):
         print(f"[成交] {trade.stock_code} | 数量: {trade.traded_volume} | 价格: {trade.traded_price:.4f}")
+        strategy_name = getattr(trade, 'strategy_name', '')
+        stock_code = getattr(trade, 'stock_code', '')
+        traded_volume = int(getattr(trade, 'traded_volume', 0) or 0)
+        if not stock_code or traded_volume <= 0:
+            return
+        if strategy_name == STRATEGY_BUY_TAG:
+            self.ledger.record_buy(stock_code, traded_volume)
+            print(f"[90号账本] 买入成交 {stock_code} +{traded_volume}，策略持仓 {self.ledger.get(stock_code)}")
+        elif strategy_name == STRATEGY_SELL_TAG:
+            self.ledger.record_sell(stock_code, traded_volume)
+            print(f"[90号账本] 卖出成交 {stock_code} -{traded_volume}，策略持仓 {self.ledger.get(stock_code)}")
 
 
 # ================= 4. 工具函数 =================
@@ -129,23 +147,22 @@ def get_latest_price(stock_code: str) -> float:
     return 0.0
 
 
-def get_strategy_total_value(trader: XtQuantTrader, account: StockAccount) -> float:
+def get_strategy_total_value(trader: XtQuantTrader, account: StockAccount,
+                             pos_map: dict) -> float:
     """
     动态计算本策略实际管理的总资产：
       策略 ETF 持仓市值 + 账户可用现金
     结果以 Config.total_capital 为上限，防止策略规模超出预期。
     """
-    positions = trader.query_stock_positions(account)
-    asset     = trader.query_stock_asset(account)
-
-    strategy_codes  = set(Config.weights.keys())
-    holding_value   = sum(
-        p.market_value for p in positions
-        if p.stock_code in strategy_codes and p.volume > 0
-    )
+    asset = trader.query_stock_asset(account)
+    holding_value = 0.0
+    for stock_code, owned_volume in GlobalVar.strategy_ledger.get_all().items():
+        pos = pos_map.get(stock_code)
+        if pos is None or pos.volume <= 0:
+            continue
+        unit_value = pos.market_value / pos.volume if pos.market_value > 0 else get_latest_price(stock_code)
+        holding_value += owned_volume * unit_value
     cash            = asset.cash if asset else 0.0
-    dynamic_total   = holding_value + cash
-
     # 只限制「新增现金的投入量」，不压缩已有持仓盈利
     # 这样策略 ETF 涨过 total_capital 后不会触发错误的卖出指令
     needed_cash = max(0.0, Config.total_capital - holding_value)
@@ -195,9 +212,18 @@ def check_equity_stoploss(trader: XtQuantTrader, account: StockAccount,
     stopped = set()
 
     for stock in Config.equity_etfs:
+        owned_volume = GlobalVar.strategy_ledger.get(stock)
+        if owned_volume <= 0:
+            continue
         pos = pos_map.get(stock)
         if pos is None or pos.volume <= 0:
             continue   # 未持有，跳过
+        if pos.volume != owned_volume:
+            print(
+                f"  [止损跳过] {stock} 账户合计 {pos.volume} 份、90号账本 {owned_volume} 份，"
+                "账户成本价混合了其他来源，不能用于90号止损判断"
+            )
+            continue
 
         cost          = pos.open_price          # 持仓均价（成本价）
         latest_price  = get_latest_price(stock)
@@ -211,14 +237,14 @@ def check_equity_stoploss(trader: XtQuantTrader, account: StockAccount,
                 f"  [止损] {stock} 成本: {cost:.4f} | 现价: {latest_price:.4f} "
                 f"| 跌幅: {drawdown:.1%}  ≥ -{Config.stoploss_pct:.0%}，触发清仓！"
             )
-            can_use = pos.can_use_volume
+            can_use = min(owned_volume, pos.can_use_volume)
             if can_use > 0:
                 if not DEBUG:
                     trader.order_stock(
                         account, stock,
                         xtconstant.STOCK_SELL, can_use,
                         xtconstant.LATEST_PRICE, latest_price,
-                        'strategy', 'stoploss'
+                        STRATEGY_SELL_TAG, 'stoploss'
                     )
             else:
                 print(f"  [止损] {stock} 可用份数为 0（T+1），今日无法卖出，下次再检查。"
@@ -228,6 +254,27 @@ def check_equity_stoploss(trader: XtQuantTrader, account: StockAccount,
             print(f"  [止损检查] {stock} 跌幅 {drawdown:.1%}，未触发（阈值 -{Config.stoploss_pct:.0%}）")
 
     return stopped
+
+
+def wait_for_ledger_sells(target_volumes: dict, timeout: int = 120, interval: int = 5):
+    """等待 90 号账本达到卖出后的目标份数，不要求账户聚合持仓清零。"""
+    deadline = time.time() + timeout
+    pending = set(target_volumes)
+
+    while pending and time.time() < deadline:
+        time.sleep(interval)
+        confirmed = {
+            code for code in pending
+            if GlobalVar.strategy_ledger.get(code) <= target_volumes[code]
+        }
+        for code in confirmed:
+            print(f"  [✓ 成交确认] {code} | 90号剩余 {GlobalVar.strategy_ledger.get(code)} 份")
+        pending -= confirmed
+
+    if pending:
+        print(f"  [超时警告] 以下卖单在 {timeout}s 内未完全确认成交: {pending}")
+    else:
+        print("  [轮询完成] 90号全部卖出指令已按账本确认。")
 
 def rebalance(trader: XtQuantTrader, account: StockAccount):
     """
@@ -248,19 +295,21 @@ def rebalance(trader: XtQuantTrader, account: StockAccount):
         print("[错误] 无法获取账户资产（query_stock_asset 返回 None），跳过本次再平衡。")
         return
 
-    # ── 账本同步：清理已被外部卖出但仍在账本中的 ETF ──────────────
-    hold_codes = {p.stock_code for p in positions if p.volume > 0}
-    for code in list(GlobalVar.strategy_ledger.get_all()):
-        if code not in hold_codes:
-            print(f"[账本] {code} 已不在持仓中，从策略账本移除。")
-            if not DEBUG:
-                GlobalVar.strategy_ledger.remove(code)
-
     # ── 构建持仓 Map ──────────────────────────────────────────────
     pos_map = {p.stock_code: p for p in positions if p.volume > 0}
 
+    # 账本与账户聚合持仓不一致时无法判断剩余份额归属，整轮停止最安全。
+    for code, owned_volume in GlobalVar.strategy_ledger.get_all().items():
+        account_volume = pos_map[code].volume if code in pos_map else 0
+        if account_volume < owned_volume:
+            print(
+                f"[隔离保护] {code} 账本属于90号 {owned_volume} 份，但账户合计仅 {account_volume} 份；"
+                "归属不一致，本轮停止全部下单，请先核对账本。"
+            )
+            return
+
     # ── 动态计算本次再平衡的基准总资产 ───────────────────────────
-    total_value = get_strategy_total_value(trader, account)
+    total_value = get_strategy_total_value(trader, account, pos_map)
 
     # ── 止损检查（仅权益类 ETF）─────────────────────────────────
     print("\n[止损检查] 权益类 ETF 成本回撤检查...")
@@ -276,8 +325,12 @@ def rebalance(trader: XtQuantTrader, account: StockAccount):
             print(f"{stock:<14}  已触发止损，本轮跳过再平衡")
             continue
         target_value  = total_value * weight
-        pos           = pos_map.get(stock)
-        current_value = pos.market_value if pos else 0.0
+        owned_volume  = GlobalVar.strategy_ledger.get(stock)
+        latest_price  = get_latest_price(stock) if owned_volume > 0 else 0.0
+        if owned_volume > 0 and latest_price <= 0:
+            print(f"{stock:<14}  无法取得价格，本轮跳过该品种")
+            continue
+        current_value = owned_volume * latest_price
         diff_value    = target_value - current_value   # 正=欠配(需买), 负=超配(需卖)
         dev_pct       = diff_value / target_value if target_value > 0 else 0.0
 
@@ -301,7 +354,7 @@ def rebalance(trader: XtQuantTrader, account: StockAccount):
 
     # ── 第一轮：执行卖出 ──────────────────────────────────────────
     has_sell    = False
-    sold_targets: dict = {}   # {stock: current_value}，用于轮询确认成交
+    sold_targets: dict = {}   # {stock: 卖出后90号目标份数}，用于轮询成交
     print("[再平衡] 第一轮：检查是否需要卖出（超配品种）")
 
     for stock, info in sorted_stocks:
@@ -333,7 +386,8 @@ def rebalance(trader: XtQuantTrader, account: StockAccount):
         # 受限于 T+1 可用份数
         pos         = pos_map.get(stock)
         can_use     = pos.can_use_volume if pos else 0
-        sell_shares = min(sell_shares, can_use)
+        owned_volume = GlobalVar.strategy_ledger.get(stock)
+        sell_shares = min(sell_shares, owned_volume, can_use)
 
         if sell_shares <= 0:
             print(f"  [{stock}] 可用份数为 0（T+1 锁仓或冻结），跳过。")
@@ -347,20 +401,23 @@ def rebalance(trader: XtQuantTrader, account: StockAccount):
 
         if not DEBUG:
             # 使用 LATEST_PRICE 类型，QMT 以最新价撮合
-            trader.order_stock(
+            order_id = trader.order_stock(
                 account, stock,
                 xtconstant.STOCK_SELL, sell_shares,
                 xtconstant.LATEST_PRICE, latest_price,
-                'strategy', 'rebalance_sell'
+                STRATEGY_SELL_TAG, 'rebalance_sell'
             )
+            if order_id == -1:
+                print(f"  [拒单] {stock} 卖出报单失败，不进入成交等待。")
+                continue
             sell_log.append(f"{stock} {sell_shares}份 @{latest_price:.4f} 预计到手{proceeds:,.0f}元")
-            sold_targets[stock] = info['current_value']
+            sold_targets[stock] = owned_volume - sell_shares
         has_sell = True
 
     if has_sell:
         print("\n[再平衡] 已发送卖出指令，轮询等待成交确认...")
         if not DEBUG:
-            TradeMgr.wait_for_sells(trader, account, sold_targets, timeout=120, interval=5)
+            wait_for_ledger_sells(sold_targets, timeout=120, interval=5)
 
     # ── 第二轮：执行买入 ──────────────────────────────────────────
     # 重新查询可用资金（卖出可能已到账）
@@ -419,10 +476,9 @@ def rebalance(trader: XtQuantTrader, account: StockAccount):
                 account, stock,
                 xtconstant.STOCK_BUY, buy_shares,
                 xtconstant.LATEST_PRICE, latest_price,
-                'strategy', 'rebalance_buy'
+                STRATEGY_BUY_TAG, 'rebalance_buy'
             )
             if seq != -1:
-                GlobalVar.strategy_ledger.add(stock)
                 available_cash -= actual_cost
                 buy_log.append(f"{stock} {buy_shares}份 @{latest_price:.4f} 预计花费{actual_cost:,.0f}元")
             else:
@@ -465,7 +521,7 @@ def run_strategy():
     trader     = XtQuantTrader(Config.mini_qmt_path, session_id)
     account    = StockAccount(Config.account_id)
 
-    trader.register_callback(MyCallback())
+    trader.register_callback(MyCallback(GlobalVar.strategy_ledger))
     trader.start()
     trader.connect()
     trader.subscribe(account)
@@ -474,13 +530,14 @@ def run_strategy():
     print(f"  总资金预算: {Config.total_capital:,.0f} 元")
     print(f"  目标配置: { {k: f'{v:.0%}' for k, v in Config.weights.items()} }")
     print(f"  再平衡阈值: {Config.rebalance_threshold:.0%} / 最小份数: {Config.rebalance_min_shares}")
+    print(f"  90号独立持仓账本: {GlobalVar.strategy_ledger.get_all()}")
     print(f"  DEBUG 模式: {DEBUG}\n")
 
     # ── 预下载行情 ────────────────────────────────────────────────
     download_etf_data()
 
     # ── 每日任务执行标记 ─────────────────────────────────────────
-    task_done = {'09:35': False}
+    task_done = {'14:35': False}
 
     while True:
         now      = datetime.datetime.now(BEIJING_TZ)
@@ -492,13 +549,13 @@ def run_strategy():
                 task_done[k] = False
             time.sleep(1)
 
-        # ── 09:35 每日再平衡 ──────────────────────────────────────
+        # ── 14:35 每日再平衡 ──────────────────────────────────────
         # 选在开盘 5 分钟后执行，避开集合竞价的价格异常波动
-        if DEBUG or (time_str == '09:35' and not task_done['09:35'] and is_trading_day()):
+        if DEBUG or (time_str == '14:35' and not task_done['14:35'] and is_trading_day()):
             print(f"\n[{time_str}] 触发每日再平衡任务...")
             download_etf_data()   # 保证行情最新
             rebalance(trader, account)
-            task_done['09:35'] = True
+            task_done['14:35'] = True
 
         if DEBUG:
             break
@@ -514,6 +571,14 @@ if __name__ == '__main__':
     parser = argparse.ArgumentParser(description='固收+ ETF 再平衡策略 (kj202590)')
     parser.add_argument('-m', '--mode', type=str, default='DEBUG',
                         help='运行模式: REAL（实盘）或 DEBUG（调试，仅输出日志）')
+    parser.add_argument(
+        '--init-ledger', metavar='POSITIONS',
+        help='初始化份数账本并退出，例如 "518880.SH=1000,511010.SH=500"；空账本用 empty'
+    )
+    parser.add_argument(
+        '--force-init-ledger', action='store_true',
+        help='允许 --init-ledger 覆盖已有账本（请谨慎使用）'
+    )
     args = parser.parse_args()
 
     if args.mode == 'REAL':
@@ -523,4 +588,36 @@ if __name__ == '__main__':
         print('>>> 当前处于 [DEBUG 调试模式]：仅输出日志，不触发真实报单。')
         DEBUG = True
 
-    run_strategy()
+    instance_lock = SingleInstanceLock(os.path.join(current_dir, 'kj202590.lock'))
+    if not instance_lock.acquire():
+        print('>>> 启动失败：90号策略已有一个实例正在运行。')
+        sys.exit(2)
+
+    try:
+        if args.init_ledger is not None:
+            try:
+                positions = StrategyVolumeLedger.parse_positions(args.init_ledger)
+                unknown_codes = set(positions) - set(Config.weights)
+                if unknown_codes:
+                    raise ValueError(f"以下代码不在90号资产池中: {sorted(unknown_codes)}")
+                GlobalVar.strategy_ledger.initialize(positions, overwrite=args.force_init_ledger)
+                print(
+                    f">>> 90号账本初始化完成: {GlobalVar.strategy_ledger.filepath} "
+                    f"| {GlobalVar.strategy_ledger.get_all()}"
+                )
+            except (ValueError, FileExistsError) as e:
+                print(f">>> 90号账本初始化失败: {e}")
+                sys.exit(2)
+            sys.exit(0)
+
+        if not DEBUG and not GlobalVar.strategy_ledger.initialized:
+            reason = (
+                f"账本损坏: {GlobalVar.strategy_ledger.load_error}"
+                if GlobalVar.strategy_ledger.load_error else '账本尚未初始化'
+            )
+            print(f">>> REAL 模式拒绝启动：{reason}。请先使用 --init-ledger 初始化。")
+            sys.exit(2)
+
+        run_strategy()
+    finally:
+        instance_lock.release()

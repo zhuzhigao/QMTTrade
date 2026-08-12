@@ -1,7 +1,10 @@
 # coding:utf-8
+
+import xtquant
 from xtquant import xtdata
 from xtquant import xttrader, xttype
 import time
+
 
 # ==========================================
 # 1. 路径设置 (请务必修改为您自己的路径！！！)
@@ -12,6 +15,23 @@ mini_qmt_path = r'D:\光大证券金阳光QMT实盘\userdata_mini'
 
 # 随便写个数字作为 session_id
 session_id = 123456 
+
+print(xtquant.__file__)
+
+xtdata.data_dir = mini_qmt_path
+
+
+
+result = xtdata.connect()
+print("connect返回：", result)
+
+
+
+# print("connect result:", result)
+# print("data path:", xtdata.get_data_dir())
+# #xtdata.connect(port=58609)
+
+
 
 # ==========================================
 # 2. 测试行情连接 (无需启动 QMT 也能跑)

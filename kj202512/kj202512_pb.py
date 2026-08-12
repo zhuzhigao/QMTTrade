@@ -79,6 +79,13 @@ class PBStrategy(Strategy):
             ledger_file=os.path.join(_base, 'pb_holdings.json'),
             use_stoploss=True,   # 原版有 close_for_stoplost
         )
+        # DEBUG 模式：每次重启清空日期/月份守卫，确保所有模块启动后立即可触发
+        if debug:
+            self.monthly_adjusted_month = -1
+            self.trade_date = ''
+            self.limit_check_14_date = ''
+            self.limit_check_1450_date = ''
+            LOG.info("[DEBUG] 日期守卫已重置，所有模块本次启动后立即触发")
         LOG.info(f"PB策略初始化完成，预算 {self.TOTAL_BUDGET:,} 元")
 
     # ── 每秒调用入口 ──────────────────────────
